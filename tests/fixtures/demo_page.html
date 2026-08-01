@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demo Page</title>
+    <style>
+      /* Absolute positions so the test's hardcoded click coordinates are
+         deterministic. A real policy would find these from the screenshot. */
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        background: #fff;
+      }
+      #q {
+        position: absolute;
+        left: 100px;
+        top: 100px;
+        width: 400px;
+        height: 40px;
+        font-size: 18px;
+        box-sizing: border-box;
+      }
+      #go {
+        position: absolute;
+        left: 520px;
+        top: 100px;
+        width: 120px;
+        height: 40px;
+        font-size: 18px;
+      }
+      #result {
+        position: absolute;
+        left: 100px;
+        top: 170px;
+        font-size: 20px;
+      }
+      /* Tall filler so Scroll actions have somewhere to go. */
+      #filler {
+        position: absolute;
+        top: 260px;
+        left: 100px;
+        height: 3000px;
+        width: 600px;
+        background: linear-gradient(#eef, #fee);
+      }
+      #bottom {
+        position: absolute;
+        top: 3200px;
+        left: 100px;
+        font-size: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 style="position: absolute; left: 100px; top: 30px">Demo Page</h1>
+    <input id="q" type="text" placeholder="type here" />
+    <button id="go">Submit</button>
+    <div id="result">nothing submitted yet</div>
+    <div id="filler"></div>
+    <div id="bottom">bottom of the page</div>
+
+    <script>
+      function submit() {
+        const value = document.getElementById("q").value;
+        document.getElementById("result").textContent = "submitted: " + value;
+        // Reflected in the title so it shows up in the trajectory log,
+        // which is how the test proves the action really reached the page.
+        document.title = "Demo Page - typed: " + value;
+      }
+      document.getElementById("go").addEventListener("click", submit);
+      document.getElementById("q").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") submit();
+      });
+    </script>
+  </body>
+</html>

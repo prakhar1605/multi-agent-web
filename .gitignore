@@ -1,0 +1,19 @@
+# Environments
+.venv/
+venv/
+
+# Run artifacts (screenshots + trajectories)
+runs/
+
+# Python
+__pycache__/
+*.pyc
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Read-only reference material (third-party sources, cloned locally for
+# reading only -- never shipped from this repo).
+reference/
