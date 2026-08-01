@@ -1,8 +1,9 @@
-# Phase 1 dependencies. No model runtime yet -- MolmoWeb is still a stub, and
-# adding torch/transformers before the format is known would be dead weight.
+# Phase 1 dependencies. No model runtime here on purpose: MolmoWeb is driven
+# over HTTP, so torch/transformers live on the GPU host, not in this repo.
 playwright>=1.48
 pydantic>=2.7
 pillow>=10.0
+httpx>=0.27
 
 # Testing
 pytest>=8.0

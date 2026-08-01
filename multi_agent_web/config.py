@@ -7,6 +7,7 @@ to browse) lives here, so a future manager can hand each parallel agent its own
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -43,8 +44,6 @@ class RunConfig(BaseModel):
     navigation_timeout_ms: int = Field(default=30_000, gt=0)
     # Grace period after each action so the page can react before we screenshot.
     settle_ms: int = Field(default=400, ge=0)
-    # Default scroll distance in pixels when an action does not specify one.
-    default_scroll_amount: int = Field(default=400, gt=0)
 
     # --- Logging -----------------------------------------------------------
     runs_dir: Path = Path("runs")
@@ -55,6 +54,46 @@ class RunConfig(BaseModel):
         """Viewport in the shape Playwright expects."""
         return {"width": self.viewport_width, "height": self.viewport_height}
 
-    def contains_point(self, x: int, y: int) -> bool:
+    def contains_point(self, x: float, y: float) -> bool:
         """True if (x, y) falls inside the viewport coordinate space."""
         return 0 <= x < self.viewport_width and 0 <= y < self.viewport_height
+
+
+class MolmoWebConfig(BaseModel):
+    """Connection and prompting settings for the MolmoWeb model server.
+
+    Separate from ``RunConfig`` because it describes the *policy*, not the
+    browser -- and because a Phase 2 fleet shares one model server while each
+    agent gets its own browser.
+
+    The endpoint is never hardcoded: pass it explicitly or set
+    ``MOLMOWEB_ENDPOINT``. The server is expected to be reachable over the
+    network, so running the GPU on another machine is just a different URL.
+    """
+
+    endpoint: str = Field(
+        description="Base URL of the model server, e.g. http://gpu-host:8001. "
+        "The adapter POSTs to {endpoint}/predict."
+    )
+    # "molmo_web_think" is the style tag the model was trained with; it is
+    # prepended to the user message as f"{system_message}: {user_message}".
+    system_message: str = "molmo_web_think"
+    # How many past steps to render into the prompt. The reference client uses
+    # 10; MultimodalAgent's own default is 3.
+    max_past_steps: int = Field(default=10, gt=0)
+    timeout_s: float = Field(default=120.0, gt=0)
+    # None means "let the server use its configured default".
+    temperature: float | None = None
+    top_p: float | None = None
+
+    @classmethod
+    def from_env(cls, endpoint: str | None = None, **overrides) -> "MolmoWebConfig | None":
+        """Build from ``MOLMOWEB_ENDPOINT`` unless an endpoint is passed.
+
+        Returns ``None`` when no endpoint is configured, so callers can skip
+        model-dependent work instead of failing.
+        """
+        resolved = endpoint or os.environ.get("MOLMOWEB_ENDPOINT", "").strip()
+        if not resolved:
+            return None
+        return cls(endpoint=resolved, **overrides)

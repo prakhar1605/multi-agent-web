@@ -69,14 +69,19 @@ class ActionBase(BaseModel):
 
 
 class Click(ActionBase):
-    """Left-click at a point in the viewport. See module docstring for units."""
+    """Left-click at a point in the viewport. See module docstring for units.
+
+    Coordinates are floats: MolmoWeb emits one-decimal percentages, which map to
+    fractional pixels (50.3% of 1280 = 643.8). Rounding to int would throw away
+    precision Playwright happily accepts.
+    """
 
     type: Literal["click"] = "click"
-    x: int = Field(ge=0, description="Pixels from the left edge of the viewport.")
-    y: int = Field(ge=0, description="Pixels from the top edge of the viewport.")
+    x: float = Field(ge=0, description="Pixels from the left edge of the viewport.")
+    y: float = Field(ge=0, description="Pixels from the top edge of the viewport.")
 
     def summary(self) -> str:
-        return f"click({self.x}, {self.y})"
+        return f"click({self.x:g}, {self.y:g})"
 
 
 class Type(ActionBase):
@@ -100,19 +105,42 @@ class Type(ActionBase):
 
 
 class Scroll(ActionBase):
-    """Scroll the page by a pixel amount in one of four directions."""
+    """Scroll by a signed pixel delta on each axis.
+
+    A signed vector rather than direction + magnitude, so that anything the
+    model can express, we can execute. MolmoWeb emits ``{delta_x, delta_y}`` and
+    can move both axes in one action; a direction enum would force us to drop an
+    axis, and a silently dropped axis would surface later as an unexplained
+    model failure in the trajectory. That violates the no-repair principle: the
+    environment should execute what was predicted, or fail visibly.
+
+    Sign convention matches the reference implementation: positive ``delta_y``
+    scrolls DOWN, positive ``delta_x`` scrolls RIGHT.
+    """
 
     type: Literal["scroll"] = "scroll"
-    direction: Literal["up", "down", "left", "right"] = "down"
-    amount: int | None = Field(
-        default=None,
-        gt=0,
-        description="Distance in pixels. None means RunConfig.default_scroll_amount.",
-    )
+    delta_x: float = Field(default=0.0, description="Pixels right (+) or left (-).")
+    delta_y: float = Field(default=0.0, description="Pixels down (+) or up (-).")
+
+    @classmethod
+    def by(
+        cls, direction: Literal["up", "down", "left", "right"], amount: float
+    ) -> "Scroll":
+        """Readable constructor for hand-written scripts and tests.
+
+        ``Scroll.by("down", 600)`` == ``Scroll(delta_y=600)``.
+        """
+        if amount <= 0:
+            raise ValueError("amount must be positive; use `direction` for the sign")
+        return {
+            "up": cls(delta_y=-amount),
+            "down": cls(delta_y=amount),
+            "left": cls(delta_x=-amount),
+            "right": cls(delta_x=amount),
+        }[direction]
 
     def summary(self) -> str:
-        amount = self.amount if self.amount is not None else "default"
-        return f"scroll({self.direction}, {amount})"
+        return f"scroll(dx={self.delta_x:g}, dy={self.delta_y:g})"
 
 
 class KeyPress(ActionBase):
@@ -165,14 +193,26 @@ class Done(ActionBase):
     """Terminate the episode and report an answer.
 
     This is the only action the agent loop treats as terminal.
+
+    ``sentinel`` records *why* a model-driven run stopped. MolmoWeb has no
+    dedicated done action -- it emits ``send_msg_to_user`` and encodes
+    terminality as a prefix in the message string, either ``[ANSWER]`` (here is
+    the result) or ``[EXIT]`` (I am finished). Both end the episode, but they
+    mean different things, and collapsing them would lose that. The prefix is
+    stripped; ``answer`` holds only the text that followed it.
     """
 
     type: Literal["done"] = "done"
     answer: str = ""
+    sentinel: Literal["[ANSWER]", "[EXIT]"] | None = Field(
+        default=None,
+        description="Which terminal marker the policy emitted, if it uses them.",
+    )
 
     def summary(self) -> str:
         preview = self.answer if len(self.answer) <= 60 else self.answer[:57] + "..."
-        return f"done({preview!r})"
+        marker = f"{self.sentinel} " if self.sentinel else ""
+        return f"done({marker}{preview!r})"
 
 
 # Discriminated union: pydantic reads the ``type`` field first and dispatches to

@@ -20,7 +20,7 @@ from .actions import (
 )
 from .agent import Agent, RunResult, run_task
 from .browser import ActionError, BrowserSession, PageInfo
-from .config import RunConfig
+from .config import MolmoWebConfig, RunConfig
 from .trajectory import Step, Trajectory, load_trajectory
 
 __version__ = "0.1.0"
@@ -34,6 +34,7 @@ __all__ = [
     "Click",
     "Done",
     "KeyPress",
+    "MolmoWebConfig",
     "Navigate",
     "PageInfo",
     "RunConfig",

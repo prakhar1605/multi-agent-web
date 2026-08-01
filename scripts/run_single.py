@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from multi_agent_web.actions import Click, Done, Scroll, Type  # noqa: E402
 from multi_agent_web.agent import run_task  # noqa: E402
-from multi_agent_web.config import RunConfig  # noqa: E402
+from multi_agent_web.config import MolmoWebConfig, RunConfig  # noqa: E402
 from multi_agent_web.policy.base import AgentPolicy  # noqa: E402
 from multi_agent_web.policy.mock import MockPolicy  # noqa: E402
 
@@ -35,19 +35,25 @@ DEFAULT_START_URL = DEMO_PAGE.as_uri() if DEMO_PAGE.exists() else "https://examp
 DEMO_SCRIPT = [
     ("The search box is near the top-left; click it to focus.", Click(x=150, y=120)),
     ("Type the query and submit it.", Type(text="multi-agent web", press_enter=True)),
-    ("Scroll down to see the rest of the page.", Scroll(direction="down", amount=600)),
+    ("Scroll down to see the rest of the page.", Scroll.by("down", 600)),
     ("Nothing left in the script.", Done(answer="mock run finished")),
 ]
 
 
-def build_policy(name: str) -> AgentPolicy:
+def build_policy(name: str, endpoint: str | None = None) -> AgentPolicy:
     """The one place a policy is chosen -- the seam Phase 1 exists to build."""
     if name == "mock":
         return MockPolicy(DEMO_SCRIPT)
     if name == "molmoweb":
         from multi_agent_web.policy.molmoweb import MolmoWebPolicy
 
-        return MolmoWebPolicy()  # raises NotImplementedError, by design
+        config = MolmoWebConfig.from_env(endpoint)
+        if config is None:
+            raise SystemExit(
+                "No model endpoint configured. Pass --endpoint http://host:8001 "
+                "or set MOLMOWEB_ENDPOINT. The server may be on another machine."
+            )
+        return MolmoWebPolicy(config)
     raise ValueError(f"unknown policy: {name}")
 
 
@@ -60,6 +66,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Show the browser window (default: headless).",
     )
     parser.add_argument("--policy", default="mock", choices=["mock", "molmoweb"])
+    parser.add_argument(
+        "--endpoint",
+        default=None,
+        help="MolmoWeb server base URL, e.g. http://gpu-host:8001. "
+        "Defaults to $MOLMOWEB_ENDPOINT. Only used with --policy molmoweb.",
+    )
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--max-steps", type=int, default=15)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
@@ -80,23 +92,22 @@ async def main_async(args: argparse.Namespace) -> int:
         slow_mo_ms=args.slow_mo,
     )
 
-    try:
-        policy = build_policy(args.policy)
-    except NotImplementedError as exc:
-        print(f"\n{exc}\n", file=sys.stderr)
-        return 2
+    policy = build_policy(args.policy, args.endpoint)
 
     print(f"task:      {args.task}")
     print(f"policy:    {policy.name}")
     print(f"start url: {args.start_url}")
     print(f"viewport:  {config.viewport_width}x{config.viewport_height}\n")
 
-    result = await run_task(
-        task=args.task,
-        policy=policy,
-        config=config,
-        start_url=args.start_url,
-    )
+    try:
+        result = await run_task(
+            task=args.task,
+            policy=policy,
+            config=config,
+            start_url=args.start_url,
+        )
+    finally:
+        await policy.close()
 
     print(f"\nstatus:  {result.status}")
     print(f"steps:   {len(result.steps)} ({result.num_errors} failed)")

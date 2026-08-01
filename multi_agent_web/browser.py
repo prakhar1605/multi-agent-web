@@ -153,7 +153,7 @@ class BrowserSession:
             if isinstance(action, Click):
                 if not self.config.contains_point(action.x, action.y):
                     raise ActionError(
-                        f"click ({action.x}, {action.y}) is outside the "
+                        f"click ({action.x:g}, {action.y:g}) is outside the "
                         f"{self.config.viewport_width}x{self.config.viewport_height} viewport"
                     )
                 await self.page.mouse.click(action.x, action.y)
@@ -165,14 +165,7 @@ class BrowserSession:
                     await self.page.keyboard.press("Enter")
 
             elif isinstance(action, Scroll):
-                amount = action.amount or self.config.default_scroll_amount
-                dx, dy = {
-                    "up": (0, -amount),
-                    "down": (0, amount),
-                    "left": (-amount, 0),
-                    "right": (amount, 0),
-                }[action.direction]
-                await self.page.mouse.wheel(dx, dy)
+                await self.page.mouse.wheel(action.delta_x, action.delta_y)
 
             elif isinstance(action, KeyPress):
                 await self.page.keyboard.press(action.key)

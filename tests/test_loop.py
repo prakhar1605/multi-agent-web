@@ -26,7 +26,7 @@ ANSWER = "typed the query and scrolled"
 SCRIPT = [
     ("Focus the input box.", Click(x=150, y=120)),
     ("Type a query and submit.", Type(text="multi-agent web", press_enter=True)),
-    ("Scroll down.", Scroll(direction="down", amount=600)),
+    ("Scroll down.", Scroll.by("down", 600)),
     ("Task complete.", Done(answer=ANSWER)),
 ]
 
@@ -94,7 +94,7 @@ async def test_loop_records_trajectory(tmp_path: Path) -> None:
 async def test_loop_stops_at_max_steps(tmp_path: Path) -> None:
     """A policy that never emits Done must be cut off by the step budget."""
     config = RunConfig(headless=True, max_steps=3, runs_dir=tmp_path / "runs")
-    policy = MockPolicy([Scroll(direction="down")] * 10)
+    policy = MockPolicy([Scroll.by("down", 400)] * 10)
 
     result = await run_task(
         task="scroll forever",

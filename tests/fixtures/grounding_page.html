@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Grounding Check</title>
+    <style>
+      /* Four widely separated buttons. Distractors matter: with a single
+         button on a blank page, a policy that always clicks the centre would
+         pass. The target's true rect is read from Playwright at runtime, so
+         nothing here has to be kept in sync with the checking script. */
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        background: #fbfbfd;
+      }
+      button {
+        position: absolute;
+        font-size: 18px;
+        border: 1px solid #8a8a8f;
+        border-radius: 8px;
+        background: #fff;
+        cursor: pointer;
+      }
+      #settings { left: 100px; top: 100px; width: 200px; height: 64px; }
+      #help     { left: 940px; top: 100px; width: 200px; height: 64px; }
+      #cancel   { left: 100px; top: 500px; width: 200px; height: 64px; }
+      /* The target. */
+      #target   { left: 900px; top: 500px; width: 240px; height: 64px;
+                  background: #0b5fff; color: #fff; border-color: #0b5fff; }
+      h1 { position: absolute; left: 100px; top: 24px; font-size: 22px; }
+      p  { position: absolute; left: 100px; top: 300px; width: 900px;
+           font-size: 16px; color: #444; }
+    </style>
+  </head>
+  <body>
+    <h1>Quarterly Reporting</h1>
+    <p>
+      The Q3 summary has finished generating. Review the figures before
+      distributing them to the team.
+    </p>
+    <button id="settings">Settings</button>
+    <button id="help">Help</button>
+    <button id="cancel">Cancel</button>
+    <button id="target">Download Report</button>
+  </body>
+</html>
