@@ -447,42 +447,125 @@ Note `x=640.0, y=270.0` on a 1280×720 viewport = exactly `x: 50.0, y: 37.5` in
 percent — consistent with §4. And `643.8` = 50.3% × 1280, showing the one-decimal
 percentage surviving into a one-decimal pixel value.
 
-### 8b. Reconstructed raw generation — **not** a repo quote
+### 8b. VERIFIED raw generations — derived from the public training data
 
-I could **not** find a literal raw generation string committed anywhere (the only
-`print` of `pred_text` is commented out at `agent/multimodal_agent.py:249`, and
-`raw_output` at `utils/eval_utils/episode.py:20` is only populated at runtime).
+**Status: verified, not reconstructed.** The training target string *is* the
+generation format by construction, and the training data is public. Rows were
+streamed from `allenai/MolmoWeb-SyntheticTrajs` (column-pruned parquet reads —
+the `trajectory` column only, never the 8.6 GB `images` column) and traced
+through the exact serializer path: `get_formatted_action`
+(`web_datasets.py:1039-1095`) → `normalize_click_coords` (`:47-68`) /
+`normalize_scroll_deltas` (`:71-83`) / `get_click_coords_from_bbox` (`:134-163`)
+→ `json.dumps(answer_dict, ensure_ascii=False)` (`:1207-1216`).
 
-The following is reconstructed from the serialization code
-(`json.dumps({"thought": ..., "action": formatted_action})`, `web_datasets.py:1207-1216`,
-with key order from `web_datasets.py:1041,1063-1066`). It is what the format
-*must* produce, not something copied out of the repo:
+From `task_seeded_wv`, sample "check pricing and availability of Apple AirTag":
 
 ```json
-{"thought": "The search box is at the top of the page. I will click it to focus it before typing the query.", "action": {"name": "click", "x": 50.2, "y": 16.7, "button": "left", "click_type": "single"}}
+{"thought": "The goal is to find information about Apple AirTag's pricing, availability, and bulk options. Since AirTag is an accessory, I will navigate to the Accessories section of the Apple Store to locate it.", "action": {"name": "click", "x": 71.1, "y": 3.1, "button": "left", "click_type": "single"}}
 ```
 
 ```json
-{"thought": "The results are below the fold, so I will scroll down by about one viewport.", "action": {"name": "scroll", "delta_x": 0.0, "delta_y": 100.0}}
+{"thought": "I will type 'AirTag' into the search field to find its pricing and availability.", "action": {"name": "keyboard_type", "text": "AirTag"}}
 ```
 
 ```json
-{"thought": "The rating is visible in the table. I have the answer and will report it.", "action": {"name": "send_msg_to_user", "msg": "[ANSWER] Magnus Carlsen, 2839"}}
+{"thought": "The pricing for the Apple AirTag is $29.00 for a 1-pack and $99.00 for a 4-pack. For availability, the page indicates free delivery and pickup at Apple Stores for available items. I've gathered all the required information.", "action": {"name": "send_msg_to_user", "msg": "[ANSWER] The Apple AirTag is priced at $29.00 for a single pack and $99.00 for a 4-pack, with both options currently available for free delivery or Apple Store pickup."}}
 ```
 
-**Verify 8b against one real generation before trusting the key names.** Cheapest
-check: uncomment `agent/multimodal_agent.py:249` in the clone, or POST to
-`/predict` per `README.md:158-169` and print `resp.json()`.
+```json
+{"thought": "The pricing and availability information for the Apple AirTag has been retrieved and communicated to the user. The goal is now fully satisfied.", "action": {"name": "send_msg_to_user", "msg": "[EXIT]"}}
+```
+
+From `node_traversal` (this config trains with empty thoughts):
+
+```json
+{"thought": "", "action": {"name": "goto", "url": "https://247sports.com"}}
+```
+
+```json
+{"thought": "", "action": {"name": "scroll", "delta_x": 0.0, "delta_y": 100.0}}
+```
+
+That scroll came from a raw `{"delta_x": 0, "delta_y": 720}` on a 720 px-tall
+screenshot — **confirming `delta_y: 100` == exactly one viewport height** (§4).
+
+#### What this confirms
+
+- Separator style is `json.dumps` default: `", "` between pairs, `": "` after keys.
+- Key order: `thought` then `action`; inside `action`, `name` first, then
+  `x, y, button, click_type` for clicks.
+- **The model emits `keyboard_type`, not `type`.** Both are accepted by the parser
+  (`multimodal_agent.py:120`), but only `keyboard_type` appears in training data.
+- The `[ANSWER]` → `[EXIT]` two-step really is in the training data as two
+  separate steps, each with its own thought.
+- No code fences, no prose wrapper, no trailing text. One JSON object per step.
+
+#### ⚠ Clipped coordinates serialize as `int`, not `float`
+
+A real `node_traversal` step whose element was below the fold
+(`bbox` y = 1810 on a 720 px screenshot) produced:
+
+```json
+{"thought": "", "action": {"name": "click", "x": 14.1, "y": 100, "button": "left", "click_type": "single"}}
+```
+
+`y` is `100`, **not** `100.0` — because `normalize_click_coords` ends with
+`max(0, min(y, upper_bound))` (`web_datasets.py:66-67`) and Python's `min`
+returns the *int* `upper_bound` when the clip fires. So a parser must accept
+`int` **or** `float` for every coordinate field. Pydantic's `float` type coerces
+`int` cleanly, so this is handled — but do not add a `strict=True` that would
+reject it.
+
+#### Verified prompt, at step 9 of that trajectory (`repr`, whitespace visible)
+
+```
+'molmo_web_think: \n# GOAL\nOn https://www.apple.com/, check the pricing ...\n\n# PREVIOUS STEPS\n## Step 1\nTHOUGHT: ...\nACTION: {\'name\': \'goto\', \'url\': \'https://www.apple.com/\'}\n## Step 2\n...\n\n# CURRENTLY ACTIVE PAGE\nPage 0: Buy AirTag - Apple | https://www.apple.com/shop/buy-airtag/airtag?fnode=...\n\n# NEXT STEP\n'
+```
+
+Confirms §1 and §6 exactly:
+
+- the prefix is `molmo_web_think: ` and the template's own leading `\n` follows it
+- history really is **single-quoted Python dict repr**, e.g.
+  `ACTION: {'name': 'click', 'x': 71.1, 'y': 3.1, 'button': 'left', 'click_type': 'single'}`
+- `## Step N` is **1-based** — the dataset's `trajectory` keys are `"1","2","3",…`
+- the rendered prompt ends with a single `\n` after `# NEXT STEP`, because Jinja2
+  strips one trailing newline by default (`keep_trailing_newline=False`)
+
+#### Still unverified
+
+No training example was observed for these, so their exact key names remain
+inferred from `convert_action_json_to_action_obj` (§3) only:
+
+`scroll_at`, `keyboard_press`, `hover_at`, `drag_and_drop` /
+`mouse_drag_and_drop`, `browser_nav`, `noop`, `report_infeasible`, `dblclick`,
+and non-`left` mouse buttons.
+
+Our adapter raises on all of these rather than guessing (see
+`policy/molmoweb.py`), so if the model reaches for one we find out immediately
+with the raw generation in the error message.
+
+#### Already-confirmed key names, independent of the above
+
+The post-parse dicts in §8a came out of `json.loads` of a real generation, so the
+key names they exercise — `goto{url}`, `click{x,y,button}`,
+`send_msg_to_user{msg}` — were already confirmed by the repo alone.
 
 ---
 
 ## 9. Open questions
 
-1. **A real raw generation.** Everything in §8b is inferred from serialization
-   code. One captured `pred_text` would confirm key order, spacing and whether the
-   model ever wraps output in a code fence.
-2. **`step_idx` base at training time** (§6) — 0- or 1-based.
+1. ~~A real raw generation.~~ **Closed** — see §8b.
+2. ~~`step_idx` base at training time.~~ **Closed: 1-based** — the dataset's
+   `trajectory` object is keyed `"1","2","3",…` (§8b).
 3. **Whether MolmoWeb ever emits `gemini_type_text_at`.** If it does, the ÷10 at
    `multimodal_agent.py:283-286` applies and its coordinates are *not* 0–100.
-4. **`[ANSWER]` vs `[EXIT]`** — we should pick the client's behaviour (§7), but
-   confirm the model reliably emits `[ANSWER]` first rather than a bare `[EXIT]`.
+   Not present in any sampled training row.
+4. ~~`[ANSWER]` vs `[EXIT]`.~~ **Closed** — training data contains both as two
+   separate steps. We terminate on either (§7).
+5. **The click-point `mode`.** `get_click_coords_from_bbox` defaults to `"center"`
+   (`web_datasets.py:985`), but released dataset-mix names embed
+   `random_gaussian` (`web_datasets_legacy.py:1644-1648`), which jitters the point
+   inside the element's bbox. This changes the *numeric label* during training,
+   never the *format*, and it does not affect inference at all — but it means the
+   model is trained to click anywhere sensible inside a target, not dead-centre.
+   Relevant when setting a grounding-accuracy tolerance.
