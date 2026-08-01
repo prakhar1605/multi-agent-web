@@ -15,6 +15,7 @@ owns no global state.
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Literal
 
 from .actions import Done, Wait
@@ -96,10 +97,13 @@ class Agent:
 
         for step_index in range(self.config.max_steps):
             # --- observe ---------------------------------------------------
+            observe_started = perf_counter()
             screenshot = await self.browser.screenshot()
             page = await self.browser.page_info()
+            browser_seconds = perf_counter() - observe_started
 
             # --- decide ----------------------------------------------------
+            predict_started = perf_counter()
             try:
                 step = await self.policy.predict(task, history, screenshot, page)
             except Exception as exc:
@@ -114,6 +118,8 @@ class Agent:
                     error=f"policy.predict failed: {exc}",
                 )
                 step.index, step.url, step.title = step_index, page.url, page.title
+                step.model_seconds = perf_counter() - predict_started
+                step.browser_seconds = browser_seconds
                 traj.record(step, screenshot)
                 history.append(step)
                 consecutive_errors += 1
@@ -123,17 +129,22 @@ class Agent:
                 await self.browser.execute(step.action)
                 continue
 
+            # A throttled policy stamps model_queue_seconds onto the step; keep
+            # it, and record the total around it here.
+            step.model_seconds = perf_counter() - predict_started
             step.index = step_index
             step.url, step.title = page.url, page.title
 
             # --- act -------------------------------------------------------
             # Done is terminal, so it is recorded but never executed.
             if isinstance(step.action, Done):
+                step.browser_seconds = browser_seconds
                 traj.record(step, screenshot)
                 history.append(step)
                 status, answer = "done", step.action.answer
                 break
 
+            act_started = perf_counter()
             try:
                 await self.browser.execute(step.action)
                 consecutive_errors = 0
@@ -145,6 +156,8 @@ class Agent:
                 step.error = f"unexpected error: {exc}"
                 consecutive_errors += 1
                 logger.exception("unexpected error at step %d", step_index)
+
+            step.browser_seconds = browser_seconds + (perf_counter() - act_started)
 
             # Recorded after execution so ``error`` is populated, but paired
             # with the pre-action screenshot the policy actually saw.

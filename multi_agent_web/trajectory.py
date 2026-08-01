@@ -57,6 +57,23 @@ class Step(BaseModel):
     )
     timestamp: str | None = None
 
+    # --- timing, for the "where does wall-clock go as N scales" plot --------
+    # Separated because they are different resources: model time is a shared,
+    # usually GPU-bound queue; browser time is local and parallelises freely.
+    model_seconds: float | None = Field(
+        default=None,
+        description="Total time inside policy.predict(), including queueing.",
+    )
+    model_queue_seconds: float | None = Field(
+        default=None,
+        description="Of model_seconds, time spent waiting for a model slot. "
+        "Set by the orchestrator's throttle; None when unthrottled.",
+    )
+    browser_seconds: float | None = Field(
+        default=None,
+        description="Time observing (screenshot + page info) and acting.",
+    )
+
     def summary(self) -> str:
         head = f"[{self.index if self.index is not None else '?'}] {self.action.summary()}"
         if self.error:
@@ -80,7 +97,7 @@ class Trajectory:
     ) -> None:
         self.task = task
         self.config = config or RunConfig()
-        self.run_dir = run_dir or self._make_run_dir(self.config.runs_dir)
+        self.run_dir = run_dir or make_run_dir(self.config.runs_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.steps_path = self.run_dir / "steps.jsonl"
         self.steps: list[Step] = []
@@ -94,16 +111,6 @@ class Trajectory:
             },
         )
 
-    @staticmethod
-    def _make_run_dir(root: Path) -> Path:
-        """``runs/<YYYYmmdd-HHMMSS>``, with a numeric suffix on collision."""
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        candidate = root / stamp
-        n = 1
-        while candidate.exists():
-            candidate = root / f"{stamp}-{n}"
-            n += 1
-        return candidate
 
     def record(self, step: Step, screenshot: Image.Image | None = None) -> Step:
         """Append one step, saving the screenshot the policy acted on.
@@ -145,6 +152,21 @@ class Trajectory:
     @staticmethod
     def _write_json(path: Path, payload: dict) -> None:
         path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def make_run_dir(root: Path) -> Path:
+    """``<root>/<YYYYmmdd-HHMMSS>``, with a numeric suffix on collision.
+
+    Shared with the orchestrator, which creates one timestamped directory for a
+    whole multi-agent run and puts ``agent_0/``, ``agent_1/`` … inside it.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = root / stamp
+    n = 1
+    while candidate.exists():
+        candidate = root / f"{stamp}-{n}"
+        n += 1
+    return candidate
 
 
 def load_trajectory(run_dir: Path) -> list[Step]:

@@ -1,4 +1,8 @@
-# multi-agent-web — Phase 1: the single-agent foundation
+# multi-agent-web — vision-language browser agents
+
+**Phase 1** — the single-agent loop. **Phase 2** — the parallel substrate and
+best-of-N. Phase 3 (a manager LLM decomposing goals into a DAG of subtasks) is
+not built.
 
 A vision-language browser agent loop:
 
@@ -12,6 +16,18 @@ screenshot ──▶ policy.predict(task, history, screenshot, page) ──▶ a
 point is to nail down the environment (browser + action space) and the policy
 interface, so that swapping in MolmoWeb-4B — and later running several of these
 agents in parallel — is a drop-in change rather than a rewrite.
+
+**Phase 2** adds the substrate for running many of those loops at once:
+
+```
+                    ┌── agent_0: own browser context + own policy ──┐
+task ── strategy ───┼── agent_1: own browser context + own policy ──┼── judge ── answer
+                    └── agent_2: own browser context + own policy ──┘
+```
+
+with two independent concurrency limits (browsers are local and memory-bound;
+the model server is shared and GPU-bound), per-step timing that separates model
+time from browser time, and one crashed agent never sinking the run.
 
 ---
 
@@ -39,6 +55,21 @@ export MOLMOWEB_ENDPOINT=http://gpu-host:8001
 python scripts/run_single.py --policy molmoweb --task "find the pricing page" \
     --start-url https://example.com
 ```
+
+### Several agents on one task (Phase 2)
+
+```bash
+# Four agents race the same task; a judge picks the winner. MockPolicy default.
+python scripts/run_multi.py --task "find the pricing page" --n 4
+
+# The interesting case: browsers run in parallel, generations queue single-file.
+python scripts/run_multi.py --task "..." --n 8 --max-browsers 8 --max-model 1
+```
+
+Output lands in `runs/<timestamp>/agent_0/`, `agent_1/`, … each keeping the
+single-agent format above, plus a top-level `run.json`
+([format](docs/run_json.md)) holding the task, per-agent outcome, judge decision
+and the timing breakdown.
 
 ### Grounding gate
 
@@ -91,10 +122,16 @@ Runs the full loop headless against `tests/fixtures/demo_page.html` over
 | `policy/molmoweb.py` | MolmoWeb-4B adapter: HTTP client + strict parser |
 | `agent.py` | the ReAct loop |
 | `trajectory.py` | `Step` + on-disk logging |
+| `orchestrator/session.py` | one isolated agent: own context, own policy |
+| `orchestrator/runner.py` | N sessions concurrently under two limits; `run.json` |
+| `orchestrator/strategy/` | `Strategy` ABC + `BestOfN` |
+| `orchestrator/judge/` | `Judge` ABC + deterministic `MockJudge` |
 | `docs/molmoweb_format.md` | the model's wire format, verified against training data |
+| `docs/run_json.md` | the multi-agent run format (stable; the UI reads it) |
 | `scripts/check_grounding.py` | acceptance gate: does a predicted click land? |
 
-Import graph is acyclic: `agent → policy → trajectory, browser → actions → config`.
+Import graph is acyclic: `orchestrator → agent → policy → trajectory, browser →
+actions → config`.
 
 ---
 
@@ -198,11 +235,49 @@ reference serializer — the training target string *is* the generation format.
 `tests/test_molmoweb_format.py` pins the parser and the prompt against them, and
 runs with no GPU and no network.
 
+## Phase 2 design decisions
+
+**Isolation is by construction, not convention.** `Runner` takes a *policy
+factory* (`Callable[[int], AgentPolicy]`), never a policy — there is no
+parameter through which two agents could receive the same one. This matters
+because policies are stateful: `MolmoWebPolicy` carries the `past_actions` it
+renders into every prompt, so a shared instance would prompt each agent with
+steps another agent took. That bug produces plausible-looking trajectories and
+is near-impossible to spot afterwards. A factory that returns a cached instance
+is caught by an identity check and reported as a crashed session.
+
+**One browser process, N contexts.** A *context* is Playwright's isolation
+unit — cookies, localStorage, IndexedDB and auth all live there. Two agents on
+separate pages of one context would share a login; on separate contexts they
+cannot. N contexts cost far less than N browser processes and isolate just as
+well. `tests/test_orchestrator.py` proves it behaviourally: state written in one
+session is invisible in another.
+
+**Two concurrency limits, because there are two resources.** Browsers are local
+and memory-bound; the model server is remote and GPU-bound. Conflating them
+hides the interesting behaviour — with 8 browsers and 1 model slot, all 8 agents
+browse in parallel and then line up single-file at the model. That is what
+`model_queue_seconds` measures, and it is the headline plot: as N grows, queue
+time rises roughly linearly while browser time stays flat, which is the point
+where adding agents stops helping.
+
+**Failures are results, not omissions.** A crashed agent becomes a
+`SessionResult` with `status="crashed"`, is reported in `run.json`, and is still
+handed to the judge — labelled. Filtering failures out before judging would make
+"three of four agents crashed" indistinguishable from "one agent answered".
+
+**The `Strategy` interface was designed for the second implementation.** A
+strategy receives the `Runner` and decides what to launch and when, so a Phase 3
+DAG can run a wave, read it, and build the next wave from the results —
+`Runner.run_sessions` is re-entrant and keeps assigning fresh agent indices.
+`contributing_indices` is a list, not a winner, so a DAG answer synthesised from
+several agents needs no schema change to a format the UI already reads.
+
 ## Next (not built)
 
-- **Phase 2**: a manager LLM that decomposes a goal into subtasks, one
-  `BrowserSession` + `Agent` per subtask running concurrently, and a result
-  aggregator. `BrowserSession` owns no global state, each agent gets its own
-  browser context, and `MolmoWebPolicy` is an async HTTP client against a shared
-  model server — so this is additive.
-- Gate it on `scripts/check_grounding.py` passing against a live endpoint first.
+- **Phase 3**: a manager LLM that decomposes a goal into a DAG of subtasks, and
+  an LLM judge. Both slot into existing interfaces — `Strategy` and `Judge` —
+  without changes here.
+- Run `scripts/check_grounding.py` against a live endpoint before trusting any
+  of this with the real model. It is unrun so far: no hardware yet. It does not
+  block Phase 2, because the orchestrator only ever talks to `AgentPolicy`.

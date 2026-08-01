@@ -55,10 +55,24 @@ class BrowserSession:
     which is why nothing here is a module-level singleton.
     """
 
-    def __init__(self, config: RunConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: RunConfig | None = None,
+        browser: PWBrowser | None = None,
+    ) -> None:
+        """
+        Args:
+            config: browser settings for this session.
+            browser: an already-running Chromium to take a context from, owned
+                by the caller. The orchestrator passes one so that N concurrent
+                agents share a single browser process but each still gets its
+                own **context** -- separate cookies, localStorage and auth
+                state. Passing None launches (and later closes) a private one.
+        """
         self.config = config or RunConfig()
         self._playwright: Playwright | None = None
-        self._browser: PWBrowser | None = None
+        self._browser: PWBrowser | None = browser
+        self._owns_browser = browser is None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
 
@@ -67,11 +81,12 @@ class BrowserSession:
     async def start(self) -> "BrowserSession":
         if self._page is not None:
             return self
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self.config.headless,
-            slow_mo=self.config.slow_mo_ms or None,
-        )
+        if self._browser is None:
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(
+                headless=self.config.headless,
+                slow_mo=self.config.slow_mo_ms or None,
+            )
         self._context = await self._browser.new_context(
             viewport=self.config.viewport,
             # 1 CSS pixel == 1 screenshot pixel; see actions.py docstring.
@@ -84,8 +99,15 @@ class BrowserSession:
         return self
 
     async def close(self) -> None:
-        """Tear down in reverse order; never raise out of cleanup."""
-        for closer in (self._context, self._browser):
+        """Tear down in reverse order; never raise out of cleanup.
+
+        A borrowed browser is left running -- closing it would take down every
+        other session sharing it.
+        """
+        closers = [self._context]
+        if self._owns_browser:
+            closers.append(self._browser)
+        for closer in closers:
             if closer is not None:
                 try:
                     await closer.close()
@@ -96,7 +118,9 @@ class BrowserSession:
                 await self._playwright.stop()
             except Exception:  # pragma: no cover
                 logger.debug("error while stopping playwright", exc_info=True)
-        self._playwright = self._browser = self._context = self._page = None
+        self._playwright = self._context = self._page = None
+        if self._owns_browser:
+            self._browser = None
 
     async def __aenter__(self) -> "BrowserSession":
         return await self.start()
