@@ -28,7 +28,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from multi_agent_web.config import MolmoWebConfig, RunConfig  # noqa: E402
+from multi_agent_web.config import (  # noqa: E402
+    MolmoWebConfig,
+    QwenConfig,
+    RunConfig,
+)
 from multi_agent_web.orchestrator import (  # noqa: E402
     BestOfN,
     MockJudge,
@@ -41,16 +45,16 @@ from multi_agent_web.policy.mock import MockPolicy  # noqa: E402
 from run_single import DEFAULT_START_URL, DEMO_SCRIPT  # noqa: E402
 
 
-def build_policy_factory(name: str, endpoint: str | None = None):
-    """Return a factory, never a policy.
+def build_policy_factory(name: str, endpoint: str | None = None, max_calls: int = 100):
+    """Return ``(factory, usage_provider)``. A factory, never a policy.
 
     The orchestrator takes a factory precisely so two concurrent agents cannot
     end up sharing one stateful policy -- see orchestrator/session.py.
     """
     if name == "mock":
         # A fresh MockPolicy per agent: it holds a script cursor, which is
-        # per-episode state just like MolmoWebPolicy's past_actions.
-        return lambda index: MockPolicy(DEMO_SCRIPT)
+        # per-episode state just like the model adapters' history.
+        return (lambda index: MockPolicy(DEMO_SCRIPT)), None
 
     if name == "molmoweb":
         from multi_agent_web.policy.molmoweb import MolmoWebPolicy
@@ -63,7 +67,24 @@ def build_policy_factory(name: str, endpoint: str | None = None):
             )
         # One MolmoWebPolicy per agent; they share the model server over HTTP,
         # and --max-model bounds how many generations are in flight at once.
-        return lambda index: MolmoWebPolicy(config)
+        return (lambda index: MolmoWebPolicy(config)), None
+
+    if name == "qwen":
+        from multi_agent_web.policy.qwen import CallBudget, QwenPolicy
+
+        config = QwenConfig.from_env(max_calls_per_run=max_calls)
+        if config is None:
+            raise SystemExit(
+                "PPAPI_KEY and PPAPI_BASE_URL must both be set (.env or environment)."
+            )
+        # ONE budget shared by every agent. Each agent gets its own policy for
+        # isolation, but they all spend from the same pot -- a 4-agent run is
+        # dozens of image requests against a metered third-party key.
+        budget = CallBudget(limit=config.max_calls_per_run)
+        return (
+            lambda index: QwenPolicy(config, budget=budget, agent_index=index),
+            budget.as_dict,
+        )
 
     raise ValueError(f"unknown policy: {name}")
 
@@ -81,9 +102,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task", required=True)
     parser.add_argument("--n", type=int, default=3, help="How many agents.")
     parser.add_argument("--headed", action="store_true")
-    parser.add_argument("--policy", default="mock", choices=["mock", "molmoweb"])
+    parser.add_argument(
+        "--policy", default="mock", choices=["mock", "molmoweb", "qwen"]
+    )
     parser.add_argument("--strategy", default="best_of_n", choices=["best_of_n"])
     parser.add_argument("--endpoint", default=None, help="MolmoWeb server base URL.")
+    parser.add_argument(
+        "--max-calls",
+        type=int,
+        default=100,
+        help="Per-run API call ceiling, shared across agents (metered policies).",
+    )
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--max-steps", type=int, default=15)
     parser.add_argument(
@@ -112,7 +141,9 @@ async def main_async(args: argparse.Namespace) -> int:
         max_inflight_model_requests=args.max_model,
     )
 
-    policy_factory = build_policy_factory(args.policy, args.endpoint)
+    policy_factory, usage_provider = build_policy_factory(
+        args.policy, args.endpoint, args.max_calls
+    )
     strategy = build_strategy(args.strategy, args.n, args.start_url)
 
     print(f"task     : {args.task}")
@@ -126,6 +157,7 @@ async def main_async(args: argparse.Namespace) -> int:
         policy_factory=policy_factory,
         run_config=run_config,
         orchestrator_config=orch_config,
+        usage_provider=usage_provider,
     )
 
     print("\nper-agent:")
@@ -149,6 +181,15 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"  browser total      {t.total_browser_seconds:.2f}s")
     print(f"  peak browsers      {t.peak_concurrent_browsers}")
     print(f"  peak model inflight {t.peak_inflight_model_requests}")
+
+    if result.usage:
+        u = result.usage
+        print("\napi usage:")
+        print(f"  calls              {u['calls']}/{u['limit']}"
+              f"  ({u['retries']} retries)")
+        print(f"  tokens             {u['total_tokens']} total "
+              f"({u['prompt_tokens']} prompt, {u['completion_tokens']} completion, "
+              f"{u['reasoning_tokens']} reasoning, {u['image_tokens']} image)")
 
     print(f"\nanswer : {result.answer}")
     print(f"reason : {result.reason}")

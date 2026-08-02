@@ -6,10 +6,12 @@ working in parallel on one user goal. Each agent observes a screenshot, predicts
 a browser action, and executes it — the system runs many such loops
 concurrently under isolated browser contexts and picks the best result.
 
-> **Status.** The full pipeline is verified end-to-end against a mock policy and
-> a mock model server. **The MolmoWeb model itself has not been run** — no GPU
-> access yet. No results in this repo come from live model inference. See
-> [What is and isn't built](#what-is-and-isnt-built).
+> **Status.** The pipeline runs end-to-end against a **live vision-language
+> model** (Qwen3.5-27B over an OpenAI-compatible API): 100% on the grounding
+> gate, and multi-agent best-of-N completing real browsing tasks. The
+> **MolmoWeb adapter has never been run** — no GPU access — so every claim
+> about MolmoWeb here is derived from its published code and training data, not
+> observed. See [What is and isn't built](#what-is-and-isnt-built).
 
 ---
 
@@ -41,7 +43,12 @@ Three layers, each ignorant of the ones above it.
 
 **Why this split.** The policy interface is one method —
 `predict(task, history, screenshot, page) -> Step` — and nothing below it
-imports a model runtime. That buys three things:
+imports a model runtime. Three adapters now sit behind it, and they are as
+different as adapters get: a scripted mock, a purpose-trained web agent with its
+own output grammar (MolmoWeb, percent coordinates), and a general VLM told to
+emit our schema (Qwen, 0–1000 normalized points over a metered HTTP API).
+Adding the third required no change to the browser layer, the agent loop, or the
+orchestrator. That buys three things:
 
 - The whole system is exercisable with `MockPolicy`: no GPU, no API key, no
   network. Every test in this repo runs that way.
@@ -60,7 +67,8 @@ multi_agent_web/
   policy/
     base.py         AgentPolicy ABC — the swap point
     mock.py         scripted policy, for testing without a model
-    molmoweb.py     MolmoWeb-4B adapter: HTTP client + strict parser
+    molmoweb.py     MolmoWeb-4B adapter: percent coords, self-hosted server
+    qwen.py         Qwen VLM adapter: normalized points, metered API, budget
   orchestrator/
     session.py      one isolated agent: own browser context, own policy
     runner.py       N sessions concurrently under two limits; run.json
@@ -70,14 +78,25 @@ multi_agent_web/
 
 ## What is and isn't built
 
+**Verified against a live model (Qwen3.5-27B):**
+
+- **Grounding gate: 6/6.** Six targets — top edge, mid-screen, bottom band, a
+  34px icon, and one between two near-identical twins — every predicted click
+  landed inside its target rectangle. Annotated PNGs are written per target.
+- **Multi-agent best-of-N completing a real task.** Two agents independently
+  clicked a search field, typed, submitted, read the result back, and reported
+  it; the judge picked a winner. 8 API calls, 14.5k tokens.
+- First real timing data: **model 64.1s vs browser 3.5s** in that run, an 18:1
+  ratio. Adding agents does not help once the model saturates, which is exactly
+  what the two separate concurrency limits exist to expose.
+
 **Built and verified without a model:**
 
 - Single-agent loop, trajectory logging, run artifacts
 - MolmoWeb wire-format adapter — prompt construction, strict JSON parsing,
   percent→pixel conversion. Pinned by tests against **real generations traced
-  from Ai2's public training data**, byte-for-byte.
-- HTTP transport, exercised end-to-end against a fake server implementing the
-  reference server's contract
+  from Ai2's public training data**, byte-for-byte, and exercised end-to-end
+  against a fake server implementing the reference server's contract.
 - Parallel orchestration: isolated contexts, two concurrency limits, per-step
   model-vs-browser timing, crash containment, best-of-N with a deterministic
   judge
@@ -86,15 +105,17 @@ multi_agent_web/
 
 - Manager LLM and DAG decomposition of a goal into subtasks
 - LLM judge (the interface has a documented seam; `MockJudge` fills it)
+- Set-of-marks prompting — deliberately not built. The gate result says raw
+  coordinate grounding is sufficient on this class of page, so SoM would be
+  complexity without evidence.
 - Any UI
 
-**Built but never run against the real model:**
+**Built but never run:**
 
-- `scripts/check_grounding.py` — the acceptance gate. It asks the model to click
-  a labelled button and asserts the predicted click lands inside that button's
-  rectangle. Until it passes against a live endpoint, treat every claim about
-  MolmoWeb's behaviour here as *derived from its published code and training
-  data*, not observed.
+- `policy/molmoweb.py`. No GPU access. Treat every claim about MolmoWeb's
+  behaviour as *derived from its published code and training data*, not
+  observed. The gate is policy-agnostic and will validate it in one command
+  when hardware appears.
 
 ## Install
 
@@ -119,12 +140,25 @@ python scripts/run_multi.py --task "find the pricing page" --n 4
 python scripts/run_multi.py --task "..." --n 8 --max-browsers 8 --max-model 1
 ```
 
-With a model server (not yet exercised — no hardware):
+With a live model. Put `PPAPI_KEY` and `PPAPI_BASE_URL` in `.env` (gitignored):
 
 ```bash
-export MOLMOWEB_ENDPOINT=http://gpu-host:8001   # may be a different machine
-python scripts/check_grounding.py --trials 5    # run this FIRST
-python scripts/run_multi.py --task "..." --n 4 --policy molmoweb
+python scripts/smoke_api.py                       # verify the API contract
+python scripts/check_grounding.py --policy qwen   # run this FIRST
+python scripts/run_multi.py --task "..." --n 4 --policy qwen --max-calls 60
+```
+
+`--max-calls` is a per-run ceiling shared across agents; the run aborts rather
+than overspending, and actual usage is written to `run.json`. The grounding gate
+skips (exit 0) when nothing is configured, and the live test in the suite only
+runs under `GROUNDING_LIVE=1` — a `pytest` that silently bills a metered key is
+a trap.
+
+For MolmoWeb against a self-hosted server (never exercised — no hardware):
+
+```bash
+export MOLMOWEB_ENDPOINT=http://gpu-host:8001
+python scripts/check_grounding.py --policy molmoweb
 ```
 
 Output goes to `runs/<timestamp>/agent_0/`, `agent_1/`, … each with a screenshot
@@ -160,6 +194,18 @@ browse in parallel then queue single-file at the model. Each step records model
 time, model *queue* time, and browser time separately, so where wall-clock goes
 as N scales is a property of the logs rather than an afterthought.
 
+**Meet the model's prior; don't fight it.** The Qwen adapter was first written to
+ask for absolute pixel coordinates, on the reasoning that the model sees the
+screenshot at full size. The grounding gate scored **0/6** — but every failure
+was a *schema* error, not a miss. The model was cramming a coordinate pair into
+the `x` field, even breaking JSON to do it. Scoring the numbers it emitted
+against the targets showed all six matched the true centres to within 0.6%
+*after dividing by 1000*: Qwen-VL is trained to emit points on a 0–1000 grid,
+and that prior beats a system prompt. Switching the wire format to normalized
+`[x, y]` pairs and converting in the adapter took the gate to **6/6**. The gate
+paid for itself on its first run — a units bug that would otherwise have
+surfaced as "the model is bad at clicking".
+
 **The parser fails loudly.** An unknown action name, an unexpected key, a
 non-left mouse button — all raise, with the full raw generation in the message.
 Nothing is coerced, nothing falls back to a default action. A wrong assumption
@@ -188,13 +234,16 @@ against.
 
 ## Next
 
-1. **Run the grounding gate** against a live endpoint. Until a predicted click
-   provably lands on its target, nothing above the adapter is trustworthy.
+1. **Harder grounding pages.** 6/6 on a clean synthetic layout is a floor, not a
+   ceiling. Real sites have dense nav bars, overlapping z-indexes and ambiguous
+   labels. Set-of-marks stays unbuilt until a page defeats raw coordinates.
 2. **Manager LLM + DAG decomposition** — decompose a goal into subtasks with
    dependencies and schedule them in waves. Slots in as another `Strategy`; the
    interface and `run.json` were shaped to accept it without changes.
 3. **LLM judge**, replacing `MockJudge` at the documented seam.
-4. **UI** for replaying trajectories from `run.json` side by side.
+4. **Scaling study** — model-vs-browser time as N grows, now that there is a
+   real 18:1 measurement to extrapolate from.
+5. **UI** for replaying trajectories from `run.json` side by side.
 
 ## Credits
 

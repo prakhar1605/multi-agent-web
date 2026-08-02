@@ -23,7 +23,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from multi_agent_web.actions import Click, Done, Scroll, Type  # noqa: E402
 from multi_agent_web.agent import run_task  # noqa: E402
-from multi_agent_web.config import MolmoWebConfig, RunConfig  # noqa: E402
+from multi_agent_web.config import (  # noqa: E402
+    MolmoWebConfig,
+    QwenConfig,
+    RunConfig,
+)
 from multi_agent_web.policy.base import AgentPolicy  # noqa: E402
 from multi_agent_web.policy.mock import MockPolicy  # noqa: E402
 
@@ -44,6 +48,16 @@ def build_policy(name: str, endpoint: str | None = None) -> AgentPolicy:
     """The one place a policy is chosen -- the seam Phase 1 exists to build."""
     if name == "mock":
         return MockPolicy(DEMO_SCRIPT)
+    if name == "qwen":
+        from multi_agent_web.policy.qwen import QwenPolicy
+
+        qwen_config = QwenConfig.from_env()
+        if qwen_config is None:
+            raise SystemExit(
+                "PPAPI_KEY and PPAPI_BASE_URL must both be set (.env or environment)."
+            )
+        return QwenPolicy(qwen_config)
+
     if name == "molmoweb":
         from multi_agent_web.policy.molmoweb import MolmoWebPolicy
 
@@ -65,7 +79,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Show the browser window (default: headless).",
     )
-    parser.add_argument("--policy", default="mock", choices=["mock", "molmoweb"])
+    parser.add_argument(
+        "--policy", default="mock", choices=["mock", "molmoweb", "qwen"]
+    )
     parser.add_argument(
         "--endpoint",
         default=None,

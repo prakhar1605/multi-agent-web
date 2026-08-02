@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -230,6 +230,9 @@ class OrchestrationResult:
     details: dict[str, Any] = field(default_factory=dict)
     started_at: str = ""
     finished_at: str = ""
+    #: Optional provider-level accounting (API calls, tokens). Populated for
+    #: metered policies; always credential-free.
+    usage: dict[str, Any] | None = None
 
     @property
     def num_succeeded(self) -> int:
@@ -248,6 +251,7 @@ class OrchestrationResult:
             "details": self.details,
             "agents": [s.as_dict() for s in self.sessions],
             "timing": self.timing.as_dict(),
+            "usage": self.usage,
         }
 
 
@@ -292,6 +296,7 @@ async def orchestrate(
     orchestrator_config: OrchestratorConfig | None = None,
     run_dir: Path | None = None,
     write_report: bool = True,
+    usage_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> OrchestrationResult:
     """Top-level entry point: run one strategy end to end and report.
 
@@ -299,6 +304,11 @@ async def orchestrate(
     and decides how many sessions to launch and with what tasks -- best-of-N
     launches N copies of one task; a Phase 3 DAG strategy will launch waves of
     different subtasks against the same Runner.
+
+    ``usage_provider`` is called once at the end and its result stored under
+    ``usage`` in run.json. Metered policies pass their shared call budget's
+    ledger through it, so a run's API spend is recorded alongside its outcome.
+    It must never return credentials.
     """
     run_config = run_config or RunConfig()
     started = perf_counter()
@@ -330,6 +340,7 @@ async def orchestrate(
         details=outcome.details,
         started_at=started_at,
         finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        usage=usage_provider() if usage_provider else None,
     )
     if write_report:
         write_run_json(result)

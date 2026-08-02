@@ -10,7 +10,33 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
+
+# Repo root, so a .env next to it is found regardless of the working directory.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_env_file(path: Path | None = None) -> None:
+    """Load ``KEY=value`` pairs from a ``.env`` file into ``os.environ``.
+
+    Deliberately minimal and dependency-free. Real environment variables always
+    win, so exporting a value overrides the file rather than the reverse -- that
+    ordering matters for CI, where secrets arrive as env vars and no file exists.
+
+    Never logs values: this file holds credentials.
+    """
+    path = path or _REPO_ROOT / ".env"
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 class RunConfig(BaseModel):
@@ -97,3 +123,73 @@ class MolmoWebConfig(BaseModel):
         if not resolved:
             return None
         return cls(endpoint=resolved, **overrides)
+
+
+class QwenConfig(BaseModel):
+    """Connection, prompting and spend settings for the PP API (Qwen) adapter.
+
+    Contract below is not from the vendor docs -- those proved stale -- but was
+    verified against the live API by ``scripts/smoke_api.py``:
+
+      * endpoint ``{base_url}/v1/chat/completions``; the ``/v1`` is REQUIRED.
+        Without it the host returns HTTP 200 carrying the marketing site's HTML,
+        so a 200 alone does not mean the call reached the API.
+      * ``Authorization: Bearer <key>``
+      * images via OpenAI-style ``image_url`` with a ``data:image/png;base64,``
+        data URL. A bare base64 string is rejected with HTTP 400.
+
+    The key is a ``SecretStr``: printing this config, dumping it into a log line
+    or serialising it into run.json all yield ``**********`` rather than the
+    credential. Reaching the real value takes an explicit
+    ``.get_secret_value()``, which is easy to grep for in review.
+    """
+
+    api_key: SecretStr
+    base_url: str
+    model: str = "qwen3.5-27b"
+
+    # --- prompting ---------------------------------------------------------
+    max_past_steps: int = Field(default=5, gt=0)
+    # Matches MolmoWeb's max_past_images=0 convention: history is text, and only
+    # the current screenshot is sent. Images dominate cost on a metered API.
+    temperature: float = 0.7
+    max_tokens: int = Field(default=1024, gt=0)
+
+    # --- reliability -------------------------------------------------------
+    timeout_s: float = Field(default=120.0, gt=0)
+    max_attempts: int = Field(default=4, gt=0)
+    backoff_base_s: float = Field(default=1.5, gt=0)
+    backoff_cap_s: float = Field(default=30.0, gt=0)
+
+    # --- spend -------------------------------------------------------------
+    # A 4-agent best-of-N at max_steps=15 is at most 60 calls, so 100 leaves
+    # headroom while still bounding a runaway loop -- which would otherwise be
+    # unbounded. Every HTTP attempt counts, retries included, because retries
+    # cost money too.
+    max_calls_per_run: int = Field(default=100, gt=0)
+
+    @classmethod
+    def from_env(cls, **overrides) -> "QwenConfig | None":
+        """Build from ``PPAPI_KEY`` / ``PPAPI_BASE_URL``.
+
+        Returns ``None`` when either is missing, so callers can skip rather than
+        fail -- the same contract as ``MolmoWebConfig.from_env``.
+        """
+        load_env_file()
+        key = os.environ.get("PPAPI_KEY", "").strip()
+        base = os.environ.get("PPAPI_BASE_URL", "").strip()
+        if not key or not base:
+            return None
+        if not base.startswith(("http://", "https://")):
+            base = "https://" + base
+        base = base.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        model = overrides.pop("model", None) or os.environ.get(
+            "PPAPI_MODEL", "qwen3.5-27b"
+        )
+        return cls(api_key=SecretStr(key), base_url=base, model=model, **overrides)
+
+    @property
+    def chat_url(self) -> str:
+        return f"{self.base_url}/v1/chat/completions"

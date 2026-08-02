@@ -42,6 +42,7 @@ step); `dir` is then `null`. Always check it before joining a path.
 | `details` | object | Strategy-specific. Shape depends on `strategy`; see below. |
 | `agents` | object[] | One per agent launched, in index order. Never filtered. |
 | `timing` | object | Where wall-clock went. |
+| `usage` | object \| null | API spend, for metered policies. `null` for local ones. |
 
 ## `agents[]`
 
@@ -94,6 +95,30 @@ grows roughly linearly in N while `total_browser_seconds` stays flat — the plo
 that shows adding agents stops helping once the model saturates. Note the
 `total_*` fields sum across agents and so exceed `wall_seconds` whenever
 anything ran in parallel; that is expected, not a bug.
+
+## `usage`
+
+Present when the policy talks to a metered API (`qwen`), `null` otherwise
+(`mock`, `molmoweb` against a self-hosted server). The budget is **shared across
+all agents in a run**, so these are run totals, not per-agent.
+
+```json
+{
+  "calls": 8, "limit": 20, "retries": 0,
+  "prompt_tokens": 13989, "completion_tokens": 466,
+  "reasoning_tokens": 0, "image_tokens": 7056, "total_tokens": 14455,
+  "calls_by_agent": {"0": 4, "1": 4}
+}
+```
+
+`calls` counts every HTTP attempt including retries, because a retried call is
+still a billed call. Reaching `limit` aborts the run deliberately rather than
+continuing to spend. `image_tokens` is usually the dominant cost — roughly half
+the prompt tokens in the example above — which is why history is text-only and
+only the current screenshot is sent.
+
+**This object never contains credentials.** The API key is held as a Pydantic
+`SecretStr` and is not part of anything serialized here.
 
 ## `details`, by strategy
 

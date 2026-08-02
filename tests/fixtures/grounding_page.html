@@ -4,43 +4,81 @@
     <meta charset="utf-8" />
     <title>Grounding Check</title>
     <style>
-      /* Four widely separated buttons. Distractors matter: with a single
-         button on a blank page, a policy that always clicks the centre would
-         pass. The target's true rect is read from Playwright at runtime, so
-         nothing here has to be kept in sync with the checking script. */
+      /* Targets are deliberately varied: a small one near the top edge, a
+         large one mid-screen, one in the bottom band, a small icon, and a pair
+         of near-identical twins where only the label distinguishes them.
+
+         Nothing here needs to stay in sync with the checking script -- it reads
+         every rect from the live page via Playwright at runtime. */
       body {
         margin: 0;
-        font-family: system-ui, sans-serif;
-        background: #fbfbfd;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #f7f8fa;
+        color: #1a1a1e;
       }
       button {
         position: absolute;
-        font-size: 18px;
-        border: 1px solid #8a8a8f;
+        font: inherit;
+        font-size: 15px;
+        border: 1px solid #9aa0aa;
         border-radius: 8px;
         background: #fff;
         cursor: pointer;
       }
-      #settings { left: 100px; top: 100px; width: 200px; height: 64px; }
-      #help     { left: 940px; top: 100px; width: 200px; height: 64px; }
-      #cancel   { left: 100px; top: 500px; width: 200px; height: 64px; }
-      /* The target. */
-      #target   { left: 900px; top: 500px; width: 240px; height: 64px;
-                  background: #0b5fff; color: #fff; border-color: #0b5fff; }
-      h1 { position: absolute; left: 100px; top: 24px; font-size: 22px; }
-      p  { position: absolute; left: 100px; top: 300px; width: 900px;
-           font-size: 16px; color: #444; }
+      .primary { background: #0b5fff; color: #fff; border-color: #0b5fff; }
+      .bar {
+        position: absolute; left: 0; width: 1280px; background: #ffffff;
+        border-color: #e2e5ea;
+      }
+      #topbar { top: 0; height: 68px; border-bottom: 1px solid #e2e5ea; }
+      #bottombar { top: 640px; height: 80px; border-top: 1px solid #e2e5ea; }
+
+      /* --- targets --- */
+      #t-nav      { left: 60px;   top: 16px;  width: 168px; height: 36px; }
+      #t-signin   { left: 1096px; top: 16px;  width: 124px; height: 36px; }
+      #t-primary  { left: 520px;  top: 300px; width: 244px; height: 60px; }
+      #t-twin-a   { left: 196px;  top: 470px; width: 164px; height: 44px; }
+      #t-small    { left: 1196px; top: 396px; width: 34px;  height: 34px;
+                    border-radius: 17px; font-size: 15px; padding: 0; }
+      #t-bottom   { left: 496px;  top: 664px; width: 272px; height: 44px; }
+
+      /* --- distractors --- */
+      #d-twin-b   { left: 376px;  top: 470px; width: 164px; height: 44px; }
+      #d-twin-c   { left: 556px;  top: 470px; width: 164px; height: 44px; }
+      #d-cancel   { left: 220px;  top: 664px; width: 132px; height: 44px; }
+      #d-help     { left: 900px;  top: 300px; width: 132px; height: 44px; }
+
+      h1 { position: absolute; left: 60px; top: 130px; font-size: 26px; margin: 0; }
+      p  { position: absolute; left: 60px; top: 180px; width: 760px;
+           font-size: 15px; color: #55565e; line-height: 1.5; margin: 0; }
+      .caption { position: absolute; left: 196px; top: 436px;
+                 font-size: 13px; color: #77787f; }
     </style>
   </head>
   <body>
+    <div id="topbar" class="bar"></div>
+    <div id="bottombar" class="bar"></div>
+
+    <button id="t-nav">Documentation</button>
+    <button id="t-signin">Sign In</button>
+
     <h1>Quarterly Reporting</h1>
     <p>
-      The Q3 summary has finished generating. Review the figures before
-      distributing them to the team.
+      The Q3 figures have finished processing. Generate the summary report, then
+      export it in whichever format your team needs before continuing.
     </p>
-    <button id="settings">Settings</button>
-    <button id="help">Help</button>
-    <button id="cancel">Cancel</button>
-    <button id="target">Download Report</button>
+
+    <button id="t-primary" class="primary">Generate Report</button>
+    <button id="d-help">Help</button>
+
+    <div class="caption">Export format</div>
+    <button id="t-twin-a">Export CSV</button>
+    <button id="d-twin-b">Export XLS</button>
+    <button id="d-twin-c">Export PDF</button>
+
+    <button id="t-small" title="Help">?</button>
+
+    <button id="d-cancel">Cancel</button>
+    <button id="t-bottom" class="primary">Accept and Continue</button>
   </body>
 </html>
