@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 
 from ..config import RunConfig
 from ..trajectory import make_run_dir
+from .events import EventSink
 from .session import (
     AgentSession,
     BrowserPool,
@@ -110,12 +111,16 @@ class Runner:
         run_config: RunConfig | None = None,
         orchestrator_config: OrchestratorConfig | None = None,
         run_dir: Path | None = None,
+        sink: EventSink | None = None,
     ) -> None:
         self.policy_factory = policy_factory
         self.run_config = run_config or RunConfig()
         self.config = orchestrator_config or OrchestratorConfig()
         self.run_dir = run_dir or make_run_dir(self.run_config.runs_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        # Observe-only. Strategies reach it as ``runner.sink``; the default
+        # discards every event, so an unattached run is unchanged. events.py.
+        self.sink = sink or EventSink()
 
         self.pool = BrowserPool(self.run_config)
         self.slot = ModelSlot(self.config.max_inflight_model_requests)
@@ -161,6 +166,15 @@ class Runner:
             self.peak_concurrent_browsers, self._live_browsers
         )
         try:
+            # Announced once a browser slot is held, i.e. when the agent is
+            # actually about to run rather than when it was merely scheduled.
+            self.sink.emit(
+                "agent_started",
+                index=index,
+                label=spec.label,
+                task=spec.task,
+                start_url=spec.start_url,
+            )
             session = AgentSession(
                 index=index,
                 spec=spec,
@@ -169,8 +183,11 @@ class Runner:
                 run_config=self.run_config,
                 run_dir=self.run_dir / f"agent_{index}",
                 slot=self.slot,
+                sink=self.sink,
             )
-            return await session.run()
+            result = await session.run()
+            self._announce_finished(result)
+            return result
         finally:
             self._live_browsers -= 1
             if self._browser_sem is not None:
@@ -202,17 +219,31 @@ class Runner:
         for index, spec, outcome in zip(indices, specs, gathered):
             if isinstance(outcome, BaseException):
                 logger.error("agent %d failed outside the session: %s", index, outcome)
-                results.append(
-                    SessionResult(
-                        index=index,
-                        spec=spec,
-                        status="crashed",
-                        error=f"{type(outcome).__name__}: {outcome}",
-                    )
+                crashed = SessionResult(
+                    index=index,
+                    spec=spec,
+                    status="crashed",
+                    error=f"{type(outcome).__name__}: {outcome}",
                 )
+                # _run_one never got to announce this one; a viewer would
+                # otherwise show an agent that started and never ended.
+                self._announce_finished(crashed)
+                results.append(crashed)
             else:
                 results.append(outcome)
         return results
+
+    def _announce_finished(self, result: SessionResult) -> None:
+        self.sink.emit(
+            "agent_finished",
+            index=result.index,
+            status=result.status,
+            answer=result.answer,
+            error=result.error,
+            num_steps=len(result.steps),
+            num_errors=result.num_errors,
+            timing=result.timing.as_dict(),
+        )
 
 
 @dataclass
@@ -297,18 +328,23 @@ async def orchestrate(
     run_dir: Path | None = None,
     write_report: bool = True,
     usage_provider: Callable[[], dict[str, Any]] | None = None,
+    sink: EventSink | None = None,
 ) -> OrchestrationResult:
     """Top-level entry point: run one strategy end to end and report.
 
     ``strategy`` is any :class:`~.strategy.base.Strategy`. It gets the Runner
     and decides how many sessions to launch and with what tasks -- best-of-N
-    launches N copies of one task; a Phase 3 DAG strategy will launch waves of
-    different subtasks against the same Runner.
+    launches N copies of one task; the DAG strategy launches waves of different
+    subtasks against the same Runner.
 
     ``usage_provider`` is called once at the end and its result stored under
     ``usage`` in run.json. Metered policies pass their shared call budget's
     ledger through it, so a run's API spend is recorded alongside its outcome.
     It must never return credentials.
+
+    ``sink`` hears the run happen (see ``events.py``). It is observe-only and
+    defaults to a sink that discards everything, so a run without one is
+    unchanged in every respect.
     """
     run_config = run_config or RunConfig()
     started = perf_counter()
@@ -319,7 +355,14 @@ async def orchestrate(
         run_config=run_config,
         orchestrator_config=orchestrator_config,
         run_dir=run_dir,
+        sink=sink,
     ) as runner:
+        runner.sink.emit(
+            "run_started",
+            task=task,
+            strategy=strategy.name,
+            run_dir=runner.run_dir.name,
+        )
         outcome = await strategy.run(task, runner)
 
     timing = summarise_timing(
@@ -344,6 +387,16 @@ async def orchestrate(
     )
     if write_report:
         write_run_json(result)
+    # After run.json exists, so a viewer that hears this can load the report.
+    runner.sink.emit(
+        "run_finished",
+        answer=result.answer,
+        reason=result.reason,
+        contributing_indices=result.contributing_indices,
+        num_succeeded=result.num_succeeded,
+        timing=timing.as_dict(),
+        usage=result.usage,
+    )
     return result
 
 

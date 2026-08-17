@@ -107,6 +107,14 @@ multi_agent_web/
   whole planning path is exercised with no API key and no spend.
 - LLM judge, filling the seam `judge/base.py` documented. Opt-in;
   `MockJudge` stays the default.
+- A local web app (`scripts/serve_ui.py`): FastAPI backend, one vanilla
+  HTML/JS page, no build step. **Replay** any past run from `runs/` with a
+  timeline scrubber, per-agent panels and a wave-laid-out DAG that steps through
+  each replan; **Live** starts a run and streams it over a WebSocket. Both work
+  with the mock policy, so the whole thing demos for free. The orchestrator
+  feeds it through an observe-only `EventSink` that changes nothing when
+  detached — every run.json and all 132 prior tests are byte-for-byte
+  unchanged.
 
 **Not built:**
 
@@ -132,7 +140,10 @@ python -m playwright install chromium
 ## Run
 
 ```bash
-pytest        # 132 pass; 1 skips unless a model endpoint is configured
+pytest        # 149 pass; 1 skips unless a model endpoint is configured
+
+# The web viewer — replay past runs and start new ones. Mock policy is free.
+python scripts/serve_ui.py            # http://localhost:8000
 
 # One agent, mock policy, bundled local page — zero network.
 python scripts/run_single.py --task "type a query on the demo page"
@@ -187,6 +198,25 @@ per step and a `steps.jsonl`, plus a top-level `run.json`
 ([format](docs/run_json.md)) holding per-agent outcomes, the judge's decision
 and the timing breakdown. A `dag` run adds the initial and final graphs, every
 replan with its reason, and the planning budget consumed.
+
+### The viewer
+
+`scripts/serve_ui.py` serves a single page at `localhost:8000` with no build
+step. **Replay** loads any directory under `runs/` — including runs made by the
+CLI before the UI existed, whose event stream is reconstructed from `run.json`
+and the trajectory files — and plays it back: a timeline scrubber, per-agent
+screenshot/thought/action panels, the judge's pick for best-of-N, and for a
+`dag` run a graph laid out by wave that you step through replan by replan, the
+manager's reason shown for each. **Live** starts a run from a form (with the
+same cost estimate the CLI prints) and streams it over a WebSocket; when it
+finishes it is just a run in `runs/`, replayable like the rest.
+
+The orchestrator emits events through an observe-only `EventSink`
+([events.py](multi_agent_web/orchestrator/events.py)). Detached — which is the
+default everywhere except the UI — it discards everything, so `run.json` and
+every test are unchanged. The sink was chosen over tailing the trajectory files
+because the manager's events (decompose, replan) never pass through the
+trajectory writer, and those are the ones the DAG panel is built around.
 
 ## Design decisions
 
@@ -269,7 +299,9 @@ against.
    most, and it is one flag: the manager is a single model with two hooks and no
    other responsibilities, so swapping it changes planning quality and nothing
    else.
-5. **UI** for replaying trajectories from `run.json` side by side.
+5. **Live model runs through the viewer.** The event stream and both UI modes
+   are done against the mock policy; the remaining step is a headed Qwen run
+   watched live, which needs the metered key rather than any more code.
 
 ## Credits
 

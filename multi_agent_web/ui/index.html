@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-Agent Web</title>
+<style>
+  :root {
+    --bg: #0b1220; --panel: #121b2e; --panel-2: #182440; --border: #24314f;
+    --text: #e8eef9; --muted: #8fa0bf; --faint: #5b6b8c; --accent: #60a5fa;
+    --pending: #64748b; --running: #f5b323; --done: #34d399; --failed: #f87171;
+    --blocked: #a78bfa; --gold: #fbbf24;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans);
+    display: grid; grid-template-rows: 52px 1fr 76px; grid-template-columns: 320px 1fr;
+    grid-template-areas: "hdr hdr" "side main" "tl tl"; overflow: hidden;
+  }
+  header { grid-area: hdr; display: flex; align-items: center; gap: 18px; padding: 0 18px;
+    border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; font-weight: 650; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  .tabs { display: flex; gap: 4px; background: var(--bg); padding: 3px; border-radius: 9px; }
+  .tabs button { background: transparent; border: 0; color: var(--muted); padding: 5px 14px;
+    border-radius: 7px; cursor: pointer; font: inherit; font-weight: 600; }
+  .tabs button.on { background: var(--panel-2); color: var(--text); }
+  #hdr-status { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 13px; }
+  #hdr-clock { font-family: var(--mono); font-size: 18px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--faint); vertical-align: middle; }
+  .dot.live { background: var(--failed); animation: blink 1.1s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+
+  aside { grid-area: side; border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto; }
+  main { grid-area: main; overflow-y: auto; padding: 18px 22px 24px; }
+  footer { grid-area: tl; border-top: 1px solid var(--border); background: var(--panel); padding: 10px 18px 8px; }
+
+  /* sidebar */
+  .side-tabs { display: flex; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); z-index: 2; }
+  .side-tabs button { flex: 1; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+    padding: 11px 0; font: inherit; font-weight: 600; cursor: pointer; }
+  .side-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  #runlist { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .run { border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; cursor: pointer; background: var(--bg); }
+  .run:hover { border-color: var(--faint); }
+  .run.on { border-color: var(--accent); background: var(--panel-2); }
+  .run .task { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .run .meta { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); font-size: 11.5px; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: .2px;
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+  .chip.dag { color: #c4b5fd; border-color: #4c3d8f; }
+  .chip.bon { color: #93c5fd; border-color: #2c4a7a; }
+  .chip.ok { color: var(--done); border-color: #1f5f47; }
+  .chip.bad { color: var(--failed); border-color: #6b2b2b; }
+  .chip.warn { color: var(--running); border-color: #6b5320; }
+  .chip.live { color: var(--failed); border-color: #6b2b2b; }
+  .empty { color: var(--faint); padding: 28px 12px; text-align: center; font-size: 13px; }
+
+  form#launch { padding: 12px 12px 20px; display: grid; gap: 10px; }
+  form label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  form input, form select, form textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 13px; }
+  form textarea { min-height: 84px; resize: vertical; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .estimate { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 12.5px; background: var(--bg); }
+  .estimate b { font-size: 15px; }
+  .estimate.free b { color: var(--done); }
+  .estimate.paid b { color: var(--running); }
+  .estimate.blocked { border-color: #6b2b2b; }
+  button.primary { background: var(--accent); color: #06121f; border: 0; border-radius: 9px; padding: 10px; font: inherit;
+    font-weight: 700; cursor: pointer; }
+  button.primary:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { color: var(--faint); font-size: 11.5px; }
+
+  /* main panels */
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+  #summary .task { font-size: 17px; line-height: 1.4; margin-bottom: 8px; }
+  #summary .chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #summary .answer { margin-top: 10px; padding: 10px 14px; border-radius: 10px; background: #0f2a20; border: 1px solid #1f5f47;
+    color: #d1fae5; font-size: 16px; white-space: pre-wrap; }
+  #summary .answer.none { background: #2a1414; border-color: #6b2b2b; color: #fecaca; }
+  #summary .banner { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: #2a1414; border: 1px solid #6b2b2b; color: #fecaca; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; }
+
+  /* DAG */
+  #dagpanel .head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  #dagpanel .head h2 { margin: 0; }
+  #dagpanel .caption { margin: 10px 0 8px; padding: 12px 16px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border);
+    font-size: 16.5px; line-height: 1.45; min-height: 46px; display: flex; gap: 12px; align-items: flex-start; }
+  #dagpanel .caption .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; font-weight: 700; padding-top: 5px; white-space: nowrap; }
+  #dagpanel .caption .v { flex: 1; }
+  #dagpanel .caption .v q { quotes: "“" "”"; }
+  #dagpanel .caption.busy { color: var(--running); }
+  #dagpanel .caption.busy .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--running); border-right-color: transparent;
+    border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .edits { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: 8px; vertical-align: 2px; }
+  .edits .e { font-family: var(--mono); font-size: 12px; padding: 1px 8px; border-radius: 6px; }
+  .edits .add { background: #0f2a20; color: var(--done); border: 1px solid #1f5f47; }
+  .edits .rm { background: #2a1414; color: var(--failed); border: 1px solid #6b2b2b; }
+  #dagwrap { overflow-x: auto; overflow-y: hidden; padding: 4px 0 6px; }
+  #dag { display: block; }
+  #dag text { font-family: var(--sans); }
+  #dag .node { cursor: pointer; }
+  #dag .node rect.body { stroke: rgba(255,255,255,.08); stroke-width: 1.5; }
+  #dag .node.pending rect.body { fill: #2b3752; }
+  #dag .node.pending text { fill: #cbd5e1; }
+  #dag .node.running rect.body { fill: var(--running); animation: pulse 1.3s ease-in-out infinite; }
+  #dag .node.done rect.body { fill: var(--done); }
+  #dag .node.failed rect.body { fill: var(--failed); }
+  #dag .node.blocked rect.body { fill: url(#hatch); stroke: var(--blocked); stroke-width: 2; }
+  #dag .node.blocked text { fill: #ede9fe; }
+  #dag .node.running text, #dag .node.done text, #dag .node.failed text { fill: #0b1220; }
+  #dag .node.hl rect.body { stroke: #fff; stroke-width: 3; }
+  #dag .node .pill { font-size: 10.5px; font-weight: 800; letter-spacing: .6px; }
+  #dag .node rect.pillbg { fill: rgba(0,0,0,.28); }
+  #dag .node.pending rect.pillbg, #dag .node.blocked rect.pillbg { fill: rgba(255,255,255,.12); }
+  #dag .edge { fill: none; stroke-width: 2.5; }
+  #dag .colhead { fill: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; }
+  #dag .colhead.now { fill: var(--running); }
+  @keyframes pulse { 50% { opacity: .62; } }
+  .replans { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .replans .lbl { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; font-weight: 700; margin-right: 4px; }
+  .rp { border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 999px; padding: 4px 12px; font: inherit;
+    font-size: 12.5px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+  .rp:hover { border-color: var(--faint); }
+  .rp.on { border-color: var(--accent); background: var(--panel-2); }
+  .rp.applied { color: var(--done); }
+  .rp.refused { color: var(--failed); text-decoration: line-through; }
+  .rp.skipped { color: var(--muted); }
+  .rp.future { opacity: .4; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
+
+  /* judge */
+  #judgepanel .verdict { font-size: 17px; margin-bottom: 6px; }
+  #judgepanel .verdict b { color: var(--gold); }
+  #judgepanel .reason { color: var(--muted); font-size: 14px; }
+  #judgepanel table { margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 13px; }
+  #judgepanel td, #judgepanel th { padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+  #judgepanel th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; }
+  #judgepanel tr.win td { color: var(--gold); }
+  #judgepanel .pending { color: var(--muted); }
+
+  /* agents */
+  #agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; margin-bottom: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .card.win { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+  .card.hl { border-color: #fff; }
+  .card .top { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  .card .idx { font-family: var(--mono); font-weight: 700; color: var(--accent); }
+  .card .label { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .card .badge { font-size: 10.5px; font-weight: 800; letter-spacing: .5px; padding: 2px 7px; border-radius: 6px; background: var(--gold); color: #1a1200; }
+  .st { font-size: 10.5px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; padding: 2px 8px; border-radius: 6px; color: #0b1220; background: var(--pending); }
+  .st.running { background: var(--running); } .st.done { background: var(--done); } .st.failed, .st.crashed, .st.aborted { background: var(--failed); }
+  .st.max_steps { background: #fb923c; } .st.blocked { background: var(--blocked); } .st.pending { background: var(--pending); color: #fff; }
+  .shot { aspect-ratio: 16 / 9; background: #05080f; position: relative; }
+  .shot img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .shot .ph { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 12.5px; }
+  .card .body { padding: 9px 12px 11px; display: grid; gap: 5px; }
+  .card .action { font-family: var(--mono); font-size: 12.5px; color: var(--text); display: flex; gap: 10px; align-items: baseline; }
+  .card .action .n { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+  .card .action .t { color: var(--faint); font-size: 11px; margin-left: auto; white-space: nowrap; }
+  .card .thought { color: var(--muted); font-size: 12.5px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-height: 17px; }
+  .card .err { color: var(--failed); font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; }
+  .card .ans { font-size: 13px; padding: 6px 9px; border-radius: 8px; background: #0f2a20; border: 1px solid #1f5f47; color: #d1fae5; white-space: pre-wrap; }
+  .card .ans.bad { background: #2a1414; border-color: #6b2b2b; color: #fecaca; }
+
+  /* result */
+  #result .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
+  #result .answer { font-size: 16px; white-space: pre-wrap; padding: 10px 14px; border-radius: 10px; background: #0f2a20; border: 1px solid #1f5f47; color: #d1fae5; }
+  #result .answer.none { background: #2a1414; border-color: #6b2b2b; color: #fecaca; }
+  #result .reason { color: var(--muted); margin-top: 8px; font-size: 13px; }
+  #result table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #result td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
+  #result td:last-child { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--bg); margin: 8px 0 4px; }
+  .bar .m { background: var(--accent); } .bar .b { background: var(--done); } .bar .q { background: var(--running); }
+  .barlbl { display: flex; gap: 14px; color: var(--muted); font-size: 12px; }
+  .barlbl i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+  /* timeline */
+  footer .row { display: flex; align-items: center; gap: 12px; }
+  footer button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  footer button.on { border-color: var(--failed); color: var(--failed); }
+  footer select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font: inherit; }
+  footer input[type=range] { flex: 1; accent-color: var(--accent); }
+  #tl-clock { font-family: var(--mono); font-size: 15px; font-variant-numeric: tabular-nums; min-width: 132px; text-align: right; }
+  #tl-caption { color: var(--muted); font-size: 12.5px; margin-top: 4px; height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+  #tl-caption b { color: var(--text); font-weight: 600; }
+  kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Multi-Agent Web <span>· viewer</span></h1>
+  <div class="tabs" id="mode-tabs">
+    <button data-mode="replay" class="on">Replay</button>
+    <button data-mode="live">Live</button>
+  </div>
+  <div id="hdr-status">
+    <span id="hdr-run"></span>
+    <span id="hdr-live"><span class="dot"></span> idle</span>
+    <span id="hdr-clock">0:00.0</span>
+  </div>
+</header>
+
+<aside>
+  <div class="side-tabs">
+    <button data-side="runs" class="on">Runs</button>
+    <button data-side="new">New run</button>
+  </div>
+  <div id="runlist"><div class="empty">loading…</div></div>
+  <form id="launch" hidden autocomplete="off">
+    <label>Preset
+      <select name="preset" id="preset"><option value="">— custom —</option></select>
+    </label>
+    <label>Task<textarea name="task" required></textarea></label>
+    <label>Start URL<input name="start_url" placeholder="https://…"></label>
+    <div class="row2">
+      <label>Strategy
+        <select name="strategy"><option value="best_of_n">best_of_n</option><option value="dag">dag</option></select>
+      </label>
+      <label>Policy
+        <select name="policy"><option value="mock">mock (free)</option><option value="qwen">qwen (PP API)</option></select>
+      </label>
+    </div>
+    <div class="row2">
+      <label>N agents<input name="n" type="number" min="1" max="12" value="4"></label>
+      <label>Max steps<input name="max_steps" type="number" min="1" max="40" value="8"></label>
+    </div>
+    <div class="row2 only-dag">
+      <label>Planning budget<input name="planning_budget" type="number" min="0" max="50" value="10"></label>
+      <label>Max subtasks<input name="max_subtasks" type="number" min="1" max="12" value="6"></label>
+    </div>
+    <div class="row2 only-bon">
+      <label>Judge
+        <select name="judge"><option value="mock">mock (rules)</option><option value="llm">llm</option></select>
+      </label>
+      <label>Max API calls<input name="max_calls" type="number" min="1" max="1000" value="100"></label>
+    </div>
+    <div class="row2 only-dag">
+      <label>Max API calls<input name="max_calls_dag" type="number" min="1" max="1000" value="200"></label>
+      <label>Max browsers<input name="max_browsers" type="number" min="1" max="8" value="4"></label>
+    </div>
+    <div class="estimate" id="estimate">…</div>
+    <button class="primary" type="submit" id="start-btn">Start run</button>
+    <div class="hint" id="launch-hint"></div>
+  </form>
+</aside>
+
+<main>
+  <section class="panel" id="summary"><div class="empty">Pick a run on the left, or start one under “New run”.</div></section>
+
+  <section class="panel" id="dagpanel" hidden>
+    <div class="head"><h2>Plan</h2><span id="dag-meta" class="hint"></span></div>
+    <div class="caption" id="dag-caption"></div>
+    <div id="dagwrap"><svg id="dag" xmlns="http://www.w3.org/2000/svg"></svg></div>
+    <div class="replans" id="replans"></div>
+    <div class="legend">
+      <span><i style="background:#2b3752"></i>pending</span>
+      <span><i style="background:var(--running)"></i>running</span>
+      <span><i style="background:var(--done)"></i>done</span>
+      <span><i style="background:var(--failed)"></i>failed</span>
+      <span><i style="background:repeating-linear-gradient(135deg,#a78bfa 0 3px,#2b3752 3px 7px)"></i>blocked (an upstream subtask failed)</span>
+    </div>
+  </section>
+
+  <section class="panel" id="judgepanel" hidden></section>
+
+  <section id="agents"></section>
+
+  <section class="panel" id="result" hidden></section>
+</main>
+
+<footer>
+  <div class="row">
+    <button id="tl-play" title="space">▶</button>
+    <select id="tl-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select>
+    <input type="range" id="tl-scrub" min="0" max="0" value="0" step="1">
+    <button id="tl-follow" hidden>● LIVE</button>
+    <span id="tl-clock">0:00.0 / 0:00.0</span>
+  </div>
+  <div id="tl-caption">Timeline: <kbd>←</kbd> <kbd>→</kbd> step · <kbd>space</kbd> play · <kbd>home</kbd>/<kbd>end</kbd></div>
+</footer>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------------------
+// state: ONE reducer for both modes. Replay reduces a loaded list; live
+// appends events as they arrive and reduces the same way. The scrubber is an
+// index into the event list, so "state at time t" is always "reduce events
+// [0..i]" -- there is no second model of a run anywhere in this file.
+// ---------------------------------------------------------------------------
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtT = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`; };
+const trunc = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const oneLine = s => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+const view = {
+  runId: null, events: [], idx: -1, live: false, follow: true, ws: null,
+  playing: false, playT: 0, speed: 1, raf: 0, lastTick: 0,
+  cards: new Map(), presets: [], hl: null, dagSig: '',
+};
+
+function newState() {
+  return { run: null, agents: {}, order: [], dag: null, manager: null, budget: null, replans: [], waves: [],
+           wavesDone: 0, currentWave: 0, judge: null, finished: null, failed: null, planning: null, last: null };
+}
+
+function apply(s, ev) {
+  const d = ev.data || {};
+  s.last = ev;
+  switch (ev.type) {
+    case 'run_started': s.run = { task: d.task, strategy: d.strategy, t: ev.t }; if (d.strategy === 'dag') s.planning = 'decomposing'; break;
+    case 'plan_created': s.dag = d.dag; s.manager = d.manager || null; s.budget = (d.manager || {}).budget || null;
+      s.planning = null; s.replans.push({ kind: 'initial', t: ev.t, wave: 0 }); break;
+    case 'wave_started': s.dag = d.dag; s.waves.push({ wave: d.wave, subtasks: d.subtasks || [], t: ev.t }); s.currentWave = d.wave; s.planning = null; break;
+    case 'agent_started': s.agents[d.index] = { index: d.index, label: d.label, task: d.task, steps: [], status: 'running', t: ev.t };
+      s.order.push(d.index); break;
+    case 'agent_step': { const a = s.agents[d.index]; if (a) a.steps.push({ ...d.step, t: ev.t }); break; }
+    case 'agent_finished': { const a = s.agents[d.index] || (s.agents[d.index] = { index: d.index, steps: [], label: null, t: ev.t });
+      Object.assign(a, { status: d.status, answer: d.answer, error: d.error, timing: d.timing, tEnd: ev.t }); if (!s.order.includes(d.index)) s.order.push(d.index); break; }
+    case 'wave_finished': s.dag = d.dag; s.wavesDone = d.wave; s.planning = 'replanning'; break;
+    case 'replan_proposed': s.planning = 'replanning'; break;
+    case 'replan_applied': s.dag = d.dag; if (d.budget) s.budget = d.budget; s.replans.push({ kind: 'applied', ...d, t: ev.t }); s.planning = null; break;
+    case 'replan_refused': s.replans.push({ kind: 'refused', ...d, t: ev.t }); s.planning = null; break;
+    case 'replan_skipped': s.replans.push({ kind: 'skipped', ...d, t: ev.t }); s.planning = null; break;
+    case 'judge_decision': s.judge = d; break;
+    case 'run_finished': s.finished = d; s.planning = null; break;
+    case 'run_failed': s.failed = d; s.planning = null; break;
+  }
+}
+function reduce(events, upto) { const s = newState(); for (let i = 0; i <= upto && i < events.length; i++) apply(s, events[i]); return s; }
+
+// ---------------------------------------------------------------------------
+// api
+// ---------------------------------------------------------------------------
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch (e) {} throw new Error(m); }
+  return r.json();
+}
+const fileUrl = rel => `/api/runs/${encodeURIComponent(view.runId)}/files/${rel.split('/').map(encodeURIComponent).join('/')}`;
+
+// ---------------------------------------------------------------------------
+// run list
+// ---------------------------------------------------------------------------
+async function loadRunList() {
+  const box = $('#runlist');
+  let runs;
+  try { runs = await api('/api/runs'); } catch (e) { box.innerHTML = `<div class="empty">could not list runs: ${esc(e.message)}</div>`; return; }
+  if (!runs.length) { box.innerHTML = '<div class="empty">No runs yet. Start one under “New run”, or run scripts/run_multi.py.</div>'; return; }
+  box.innerHTML = runs.map(r => {
+    const strat = r.strategy === 'dag' ? '<span class="chip dag">dag</span>' : '<span class="chip bon">best-of-N</span>';
+    let out;
+    if (r.live) out = '<span class="chip live">● live</span>';
+    else if (r.status === 'failed') out = '<span class="chip bad">failed</span>';
+    else if (r.answer != null) out = '<span class="chip ok">✓ answered</span>';
+    else out = '<span class="chip warn">no answer</span>';
+    const extra = r.strategy === 'dag' && r.dag ? ` · ${r.dag.subtasks ?? '?'} subtasks · ${r.dag.replans_applied ?? 0} replan${r.dag.replans_applied === 1 ? '' : 's'}` : '';
+    const when = r.started_at ? new Date(r.started_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : r.id;
+    return `<div class="run ${r.id === view.runId ? 'on' : ''}" data-id="${esc(r.id)}" title="${esc(r.id)}">
+      <div class="task">${esc(r.task || '(no task)')}</div>
+      <div class="meta">${strat}${out}<span>${r.policy || ''}</span><span>${r.num_agents ?? '?'} agents${extra}</span><span>${esc(when)}</span></div></div>`;
+  }).join('');
+  box.querySelectorAll('.run').forEach(el => el.addEventListener('click', () => openRun(el.dataset.id)));
+}
+
+// ---------------------------------------------------------------------------
+// opening a run: replay (events from disk) or live (events over a socket)
+// ---------------------------------------------------------------------------
+async function openRun(id) {
+  stopPlay(); closeWs();
+  view.runId = id; view.events = []; view.idx = -1; view.follow = true; view.cards.clear(); view.dagSig = '';
+  $('#agents').innerHTML = ''; $('#hdr-run').textContent = id;
+  history.replaceState(null, '', '#' + encodeURIComponent(id));
+  document.querySelectorAll('.run').forEach(el => el.classList.toggle('on', el.dataset.id === id));
+  let run;
+  try { run = await api(`/api/runs/${encodeURIComponent(id)}`); }
+  catch (e) { $('#summary').innerHTML = `<div class="empty">could not load ${esc(id)}: ${esc(e.message)}</div>`; return; }
+  view.live = !!run.live;
+  $('#tl-follow').hidden = !view.live;
+  if (view.live) { setLiveIndicator(true); connectWs(id); }
+  else { setLiveIndicator(false); view.events = run.events || []; setIndex(view.events.length - 1); }
+}
+function setLiveIndicator(on) { $('#hdr-live').innerHTML = on ? '<span class="dot live"></span> live' : '<span class="dot"></span> replay'; }
+function closeWs() { if (view.ws) { try { view.ws.close(); } catch (e) {} view.ws = null; } }
+function connectWs(id) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/api/runs/${encodeURIComponent(id)}/live`);
+  view.ws = ws;
+  ws.onmessage = m => {
+    const ev = JSON.parse(m.data);
+    if (ev.type === 'error') { $('#summary').innerHTML = `<div class="empty">${esc(ev.data.error)}</div>`; return; }
+    view.events.push(ev);
+    if (view.follow) setIndex(view.events.length - 1); else updateTimeline();
+    if (ev.type === 'run_finished' || ev.type === 'run_failed') { view.live = false; setLiveIndicator(false); $('#tl-follow').hidden = true; loadRunList(); }
+  };
+  ws.onclose = () => { if (view.ws === ws) view.ws = null; };
+}
+
+// ---------------------------------------------------------------------------
+// timeline
+// ---------------------------------------------------------------------------
+function setIndex(i) {
+  i = Math.max(-1, Math.min(i, view.events.length - 1));
+  view.idx = i;
+  render(reduce(view.events, i));
+  updateTimeline();
+}
+function updateTimeline() {
+  const n = view.events.length, scrub = $('#tl-scrub');
+  scrub.max = Math.max(0, n - 1); scrub.value = Math.max(0, view.idx);
+  const now = view.idx >= 0 ? view.events[view.idx].t : 0, end = n ? view.events[n - 1].t : 0;
+  $('#tl-clock').textContent = `${fmtT(now)} / ${fmtT(end)}`;
+  $('#hdr-clock').textContent = fmtT(now);
+  $('#tl-caption').innerHTML = view.idx >= 0 ? describe(view.events[view.idx]) : 'Timeline: <kbd>←</kbd> <kbd>→</kbd> step · <kbd>space</kbd> play';
+  $('#tl-follow').classList.toggle('on', view.follow && view.live);
+  $('#tl-play').textContent = view.playing ? '❚❚' : '▶';
+}
+function describe(ev) {
+  const d = ev.data || {}, at = `<b>${fmtT(ev.t)}</b> `;
+  switch (ev.type) {
+    case 'run_started': return at + `run started · ${esc(d.strategy)}`;
+    case 'plan_created': return at + `manager produced a plan with ${(d.dag?.subtasks || []).length} subtasks`;
+    case 'wave_started': return at + `wave ${d.wave} started: ${esc((d.subtasks || []).map(s => s.id).join(', '))}`;
+    case 'wave_finished': return at + `wave ${d.wave} finished` + ((d.blocked || []).length ? ` · blocked: ${esc(d.blocked.join(', '))}` : '');
+    case 'agent_started': return at + `agent ${d.index} started` + (d.label ? ` · ${esc(d.label)}` : '');
+    case 'agent_step': return at + `agent ${d.index} · step ${(d.step?.index ?? 0) + 1} · ${esc(d.step?.action)}` + (d.step?.error ? ` · <span style="color:var(--failed)">error</span>` : '');
+    case 'agent_finished': return at + `agent ${d.index} finished · ${esc(d.status)}` + (d.answer ? ` · ${esc(trunc(oneLine(d.answer), 70))}` : '');
+    case 'replan_proposed': return at + `manager proposed ${d.edits} edit(s) after wave ${d.wave}`;
+    case 'replan_applied': return at + `replan APPLIED after wave ${d.wave} · ${esc(trunc(d.reason, 90))}`;
+    case 'replan_refused': return at + `replan refused after wave ${d.wave} · ${esc(trunc(d.outcome || d.reason, 90))}`;
+    case 'replan_skipped': return at + `plan kept after wave ${d.wave} · ${esc(trunc(d.outcome || d.reason, 90))}`;
+    case 'judge_decision': return at + `judge (${esc(d.name)}) picked ` + (d.winner == null ? 'nobody' : `agent ${d.winner}`);
+    case 'run_finished': return at + `run finished · ${d.answer != null ? esc(trunc(oneLine(d.answer), 90)) : 'no answer'}`;
+    case 'run_failed': return at + `<span style="color:var(--failed)">run failed · ${esc(d.error)}</span>`;
+  }
+  return at + esc(ev.type);
+}
+// Read the slider BEFORE stopPlay(): stopping repaints the slider from view.idx,
+// which would overwrite the position the user just dragged to.
+$('#tl-scrub').addEventListener('input', e => { const i = +e.target.value; view.follow = false; stopPlay(); setIndex(i); });
+$('#tl-follow').addEventListener('click', () => { view.follow = true; setIndex(view.events.length - 1); });
+$('#tl-speed').addEventListener('change', e => { view.speed = +e.target.value; });
+$('#tl-play').addEventListener('click', togglePlay);
+function togglePlay() { if (view.playing) stopPlay(); else startPlay(); }
+function startPlay() {
+  if (!view.events.length) return;
+  view.follow = false;
+  const atEnd = view.idx >= view.events.length - 1;
+  view.playT = atEnd ? 0 : view.events[Math.max(0, view.idx)].t;
+  if (atEnd) setIndex(-1);
+  view.playing = true; view.lastTick = performance.now(); updateTimeline();
+  const tick = now => {
+    if (!view.playing) return;
+    view.playT += (now - view.lastTick) / 1000 * view.speed; view.lastTick = now;
+    let i = view.idx;
+    while (i + 1 < view.events.length && view.events[i + 1].t <= view.playT) i++;
+    if (i !== view.idx) setIndex(i);
+    if (i >= view.events.length - 1 && !view.live) { stopPlay(); return; }
+    view.raf = requestAnimationFrame(tick);
+  };
+  view.raf = requestAnimationFrame(tick);
+}
+function stopPlay() { view.playing = false; cancelAnimationFrame(view.raf); updateTimeline(); }
+document.addEventListener('keydown', e => {
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+  if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+  else if (e.key === 'ArrowRight') { view.follow = false; stopPlay(); setIndex(view.idx + 1); }
+  else if (e.key === 'ArrowLeft') { view.follow = false; stopPlay(); setIndex(view.idx - 1); }
+  else if (e.key === 'Home') { view.follow = false; stopPlay(); setIndex(0); }
+  else if (e.key === 'End') { stopPlay(); setIndex(view.events.length - 1); }
+});
+
+// ---------------------------------------------------------------------------
+// rendering
+// ---------------------------------------------------------------------------
+function render(s) { renderSummary(s); renderDag(s); renderJudge(s); renderAgents(s); renderResult(s); }
+
+function renderSummary(s) {
+  const el = $('#summary');
+  if (!s.run) { el.innerHTML = '<div class="empty">Waiting for the run to start…</div>'; return; }
+  const status = s.failed ? '<span class="chip bad">failed</span>' : s.finished ? (s.finished.answer != null ? '<span class="chip ok">finished</span>' : '<span class="chip warn">finished · no answer</span>') : '<span class="chip live">running</span>';
+  const strat = s.run.strategy === 'dag' ? '<span class="chip dag">dag</span>' : '<span class="chip bon">best-of-N</span>';
+  const n = s.order.length, done = s.order.filter(i => s.agents[i].status === 'done').length;
+  let html = `<div class="task">${esc(s.run.task)}</div><div class="chips">${strat}${status}<span class="chip">${n} agent${n === 1 ? '' : 's'} · ${done} done</span>`;
+  if (s.run.strategy === 'dag' && s.dag) { const c = s.dag.counts || {}; html += `<span class="chip">${(s.dag.subtasks || []).length} subtasks · wave ${s.currentWave || 0}</span>`; if (s.budget) html += `<span class="chip">planning budget ${s.budget.spent}/${s.budget.limit}</span>`; }
+  if (s.judge && s.judge.winner != null) html += `<span class="chip" style="color:var(--gold);border-color:#6b5320">judge → agent ${s.judge.winner}</span>`;
+  html += '</div>';
+  if (s.finished) html += s.finished.answer != null ? `<div class="answer">${esc(s.finished.answer)}</div>` : `<div class="answer none">No answer — ${esc(s.finished.reason)}</div>`;
+  if (s.failed) html += `<div class="banner">${esc(s.failed.error)}</div>`;
+  el.innerHTML = html;
+}
+
+// --- DAG -----------------------------------------------------------------
+const NW = 236, NH = 112, GAPX = 74, GAPY = 22, PADX = 18, PADY = 14, HEADH = 26;
+function renderDag(s) {
+  const panel = $('#dagpanel');
+  const isDag = s.run && s.run.strategy === 'dag';
+  panel.hidden = !isDag;
+  if (!isDag) return;
+  const meta = s.manager ? `manager: ${esc(s.manager.model || '?')} · max ${s.manager.max_subtasks} subtasks` : '';
+  $('#dag-meta').innerHTML = meta;
+  renderDagCaption(s);
+  renderReplans(s);
+  const dag = s.dag;
+  const svg = $('#dag');
+  if (!dag) { svg.innerHTML = ''; svg.setAttribute('width', 0); svg.setAttribute('height', 0); return; }
+  const subs = dag.subtasks || [];
+  const byId = Object.fromEntries(subs.map(x => [x.id, x]));
+  // Column = wave. Ran: its wave. Pending: no earlier than the next wave, and
+  // after every dependency. Blocked: where it WOULD have run (after its
+  // dependencies) -- it never will, so it must not drift right as waves pass.
+  const col = {};
+  for (const st of subs) {
+    if (st.wave) { col[st.id] = st.wave; continue; }
+    let c = st.status === 'blocked' ? 1 : s.wavesDone + 1;
+    for (const d of st.depends_on || []) { const dc = col[d] || (byId[d]?.wave) || (s.wavesDone + 1); c = Math.max(c, dc + 1); }
+    col[st.id] = c;
+  }
+  const maxCol = Math.max(1, ...Object.values(col));
+  const rows = {}; const pos = {};
+  for (const st of subs) { const c = col[st.id]; rows[c] = rows[c] || []; rows[c].push(st.id); }
+  const maxRows = Math.max(1, ...Object.values(rows).map(r => r.length));
+  const W = PADX * 2 + maxCol * NW + (maxCol - 1) * GAPX, H = PADY * 2 + HEADH + maxRows * NH + (maxRows - 1) * GAPY;
+  for (const c of Object.keys(rows)) {
+    const list = rows[c], off = (maxRows - list.length) * (NH + GAPY) / 2;
+    list.forEach((id, r) => { pos[id] = { x: PADX + (c - 1) * (NW + GAPX), y: PADY + HEADH + off + r * (NH + GAPY) }; });
+  }
+  const sig = JSON.stringify([subs.map(x => [x.id, x.status, x.wave, x.agent_index, trunc(x.answer || x.error || '', 40)]), s.wavesDone, s.currentWave, view.hl]);
+  if (sig === view.dagSig && +svg.getAttribute('width') === W) return;
+  view.dagSig = sig;
+  const color = st => ({ running: 'var(--running)', done: 'var(--done)', failed: 'var(--failed)', blocked: 'var(--blocked)' })[st] || '#3b4a6b';
+  let out = `<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)"><rect width="8" height="8" fill="#2b3752"/><rect width="3" height="8" fill="#6d5bd0"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4c5b7c"/></marker></defs>`;
+  for (let c = 1; c <= maxCol; c++) {
+    const x = PADX + (c - 1) * (NW + GAPX);
+    const now = c === s.currentWave && s.wavesDone < s.currentWave;
+    const label = c <= s.wavesDone ? `wave ${c}` : now ? `wave ${c} · running` : `wave ${c} · planned`;
+    out += `<text class="colhead ${now ? 'now' : ''}" x="${x}" y="${PADY + 12}">${label}</text>`;
+  }
+  for (const st of subs) for (const d of st.depends_on || []) {
+    const a = pos[d], b = pos[st.id]; if (!a || !b) continue;
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
+    const dep = byId[d]; const bad = dep && (dep.status === 'failed' || dep.status === 'blocked');
+    out += `<path class="edge" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" stroke="${bad ? 'var(--failed)' : dep && dep.status === 'done' ? 'var(--done)' : '#4c5b7c'}" ${bad ? 'stroke-dasharray="6 5"' : ''} marker-end="url(#arrow)"/>`;
+  }
+  for (const st of subs) {
+    const p = pos[st.id], status = st.status || 'pending';
+    const agent = st.agent_index != null ? st.agent_index : agentForSubtask(s, st.id);
+    let sub = '';
+    if (status === 'pending') sub = (st.depends_on || []).length ? `waits for ${trunc((st.depends_on || []).join(', '), 30)}` : 'ready to start';
+    else if (status === 'blocked') sub = `upstream failed: ${trunc((st.depends_on || []).filter(d => ['failed', 'blocked'].includes(byId[d]?.status)).join(', '), 24)}`;
+    else if (status === 'running') sub = agent != null ? `agent ${agent} is on it` : 'starting…';
+    else sub = agent != null ? `agent ${agent}` : '';
+    const third = status === 'done' ? '→ ' + trunc(oneLine(st.answer || ''), 32) : status === 'failed' ? '!! ' + trunc(oneLine(st.error || ''), 32) : status === 'blocked' ? 'never ran' : trunc(oneLine(st.instruction || ''), 34);
+    // Pill on its own row, id on its own row: long ids and the status label
+    // must never fight for the same pixels on a recording.
+    const pillW = 10 + status.length * 7.4;
+    const waveTag = st.wave ? `wave ${st.wave}` : (status === 'pending' ? `wave ${col[st.id]}?` : '');
+    out += `<g class="node ${status} ${view.hl === st.id ? 'hl' : ''}" data-id="${esc(st.id)}" transform="translate(${p.x},${p.y})">
+      <title>${esc(st.id)}\n${esc(st.instruction || '')}${st.answer ? '\n→ ' + esc(st.answer) : ''}${st.error ? '\n!! ' + esc(st.error) : ''}</title>
+      <rect class="body" width="${NW}" height="${NH}" rx="14"/>
+      <rect class="pillbg" x="12" y="11" width="${pillW}" height="18" rx="5"/>
+      <text class="pill" x="${12 + pillW / 2}" y="24" text-anchor="middle">${status.toUpperCase()}</text>
+      <text x="${NW - 12}" y="24" text-anchor="end" font-size="11.5" opacity=".75">${esc(waveTag)}</text>
+      <text x="12" y="52" font-size="16.5" font-weight="700">${esc(trunc(st.id, 26))}</text>
+      <text x="12" y="74" font-size="12.5" opacity=".85">${esc(sub)}</text>
+      <text x="12" y="98" font-size="12" opacity=".8" font-family="var(--mono)">${esc(third)}</text>
+    </g>`;
+  }
+  svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = out;
+  svg.querySelectorAll('.node').forEach(g => g.addEventListener('click', () => {
+    const id = g.dataset.id, st = byId[id];
+    const agent = st?.agent_index != null ? st.agent_index : agentForSubtask(s, id);
+    highlight(id, agent);
+  }));
+}
+function agentForSubtask(s, id) {
+  // During a wave the DAG snapshot does not yet know agent indices; the label
+  // is the join key both wave_started and agent_started carry.
+  for (const w of s.waves) for (const st of w.subtasks) if (st.id === id) {
+    for (const i of s.order) if (s.agents[i].label === st.label) return i;
+  }
+  return null;
+}
+function highlight(subtaskId, agentIndex) {
+  view.hl = subtaskId; view.dagSig = '';
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('hl'));
+  if (agentIndex != null) { const card = view.cards.get(agentIndex); if (card) { card.classList.add('hl'); card.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } }
+  setIndex(view.idx);
+  setTimeout(() => { view.hl = null; view.dagSig = ''; document.querySelectorAll('.card').forEach(c => c.classList.remove('hl')); if (!view.playing) setIndex(view.idx); }, 1800);
+}
+function renderDagCaption(s) {
+  const el = $('#dag-caption');
+  el.classList.remove('busy');
+  if (s.planning === 'decomposing') { el.classList.add('busy'); el.innerHTML = `<div class="v"><span class="spin"></span>manager is decomposing the task…</div>`; return; }
+  if (s.planning === 'replanning' && !s.finished) { el.classList.add('busy'); el.innerHTML = `<div class="v"><span class="spin"></span>wave ${s.wavesDone} finished — manager is deciding whether to replan…</div>`; return; }
+  const r = s.replans[s.replans.length - 1];
+  if (!r) { el.innerHTML = '<div class="v">no plan yet</div>'; return; }
+  const edits = r.kind === 'applied' || r.kind === 'refused' ? `<span class="edits">${(r.add || []).map(a => `<span class="e add">+ ${esc(a.id)}</span>`).join('')}${(r.remove || []).map(x => `<span class="e rm">− ${esc(x)}</span>`).join('')}</span>` : '';
+  if (r.kind === 'initial') {
+    const n = (s.dag?.subtasks || []).length, b = s.budget ? ` · planning budget ${s.budget.limit} edits` : '';
+    el.innerHTML = `<div class="k">Initial plan</div><div class="v">${n} subtask${n === 1 ? '' : 's'}${s.manager ? ` from ${esc(s.manager.model)}` : ''}${b}. Subtasks with no unmet dependency run at the same time.</div>`;
+  } else if (r.kind === 'applied') {
+    el.innerHTML = `<div class="k" style="color:var(--done)">Replan · after wave ${r.wave}</div><div class="v"><q>${esc(r.reason || '(no reason given)')}</q>${edits}</div>`;
+  } else if (r.kind === 'refused') {
+    el.innerHTML = `<div class="k" style="color:var(--failed)">Refused · after wave ${r.wave}</div><div class="v">${esc(r.outcome || '')}${r.reason ? ` — <q>${esc(r.reason)}</q>` : ''}${edits}</div>`;
+  } else {
+    el.innerHTML = `<div class="k">Plan kept · after wave ${r.wave}</div><div class="v">${r.called_model === false ? esc(r.reason || r.outcome) : `<q>${esc(r.reason || r.outcome || '')}</q>`}</div>`;
+  }
+}
+function renderReplans(s) {
+  const el = $('#replans');
+  // Every replan decision in the whole run (not just up to now), so the pills
+  // are a stepper: click one to jump the timeline to that moment.
+  const all = [];
+  view.events.forEach((ev, i) => { if (['plan_created', 'replan_applied', 'replan_refused', 'replan_skipped'].includes(ev.type)) all.push({ ev, i }); });
+  if (!all.length) { el.innerHTML = ''; return; }
+  const cur = s.replans.length - 1;
+  el.innerHTML = '<span class="lbl">plan history</span>' + all.map((x, k) => {
+    const d = x.ev.data || {}, kind = x.ev.type.replace('replan_', '');
+    let text = 'initial', cls = 'initial';
+    if (x.ev.type === 'replan_applied') { text = `wave ${d.wave} ✓ ${(d.add || []).length ? '+' + (d.add || []).length : ''}${(d.remove || []).length ? ' −' + (d.remove || []).length : ''}`; cls = 'applied'; }
+    else if (x.ev.type === 'replan_refused') { text = `wave ${d.wave} ✗`; cls = 'refused'; }
+    else if (x.ev.type === 'replan_skipped') { text = `wave ${d.wave} · kept`; cls = 'skipped'; }
+    return `<button class="rp ${cls} ${k === cur ? 'on' : ''} ${x.i > view.idx ? 'future' : ''}" data-i="${x.i}" title="${esc(d.reason || '')}">${esc(text)}</button>`;
+  }).join('') + (s.budget ? `<span class="chip">edits ${s.budget.spent}/${s.budget.limit}${s.budget.refused_edits ? ` · ${s.budget.refused_edits} refused` : ''}</span>` : '');
+  el.querySelectorAll('.rp').forEach(b => b.addEventListener('click', () => { view.follow = false; stopPlay(); setIndex(+b.dataset.i); }));
+}
+
+// --- judge ---------------------------------------------------------------
+function renderJudge(s) {
+  const el = $('#judgepanel');
+  const isBon = s.run && s.run.strategy === 'best_of_n';
+  el.hidden = !isBon;
+  if (!isBon) return;
+  if (!s.judge) { el.innerHTML = `<h2>Judge</h2><div class="pending">${s.finished ? 'no verdict recorded' : 'waiting for every agent to finish…'}</div>`; return; }
+  const j = s.judge;
+  const verdict = j.winner == null ? `Judge (${esc(j.name)}) picked <b>nobody</b>` : `Judge (${esc(j.name)}) picked <b>agent ${j.winner}</b>`;
+  const rows = (j.candidates || []).map(c => `<tr class="${c.index === j.winner ? 'win' : ''}"><td>${c.index === j.winner ? '★ ' : ''}agent ${c.index}</td><td><span class="st ${esc(c.status)}">${esc(c.status)}</span></td><td>${c.num_steps} steps · ${c.num_errors} err</td><td>${esc(trunc(oneLine(c.answer || (c.error ? '!! ' + c.error : '—')), 90))}</td></tr>`).join('');
+  el.innerHTML = `<h2>Judge</h2><div class="verdict">${verdict}</div><div class="reason">${esc(j.reason)}</div><table><thead><tr><th>agent</th><th>status</th><th>effort</th><th>answer</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// --- agents --------------------------------------------------------------
+function renderAgents(s) {
+  const grid = $('#agents');
+  const seen = new Set();
+  for (const i of s.order) {
+    const a = s.agents[i]; seen.add(i);
+    let card = view.cards.get(i);
+    if (!card) {
+      card = document.createElement('div'); card.className = 'card'; card.dataset.index = i;
+      card.innerHTML = `<div class="top"><span class="idx">[${i}]</span><span class="label"></span><span class="badge" hidden>JUDGE'S PICK</span><span class="st"></span></div>
+        <div class="shot"><img alt="" hidden><div class="ph">waiting for the first screenshot…</div></div>
+        <div class="body"><div class="action"><span class="n"></span><span class="a"></span><span class="t"></span></div><div class="thought"></div><div class="err" hidden></div><div class="ans" hidden></div></div>`;
+      card.addEventListener('click', () => { const id = subtaskForAgent(s, i); if (id) highlight(id, i); });
+      view.cards.set(i, card); grid.appendChild(card);
+    }
+    const last = a.steps[a.steps.length - 1];
+    const stEl = $('.st', card); const status = a.status || 'running';
+    if (stEl.textContent !== status) { stEl.textContent = status; stEl.className = 'st ' + status; }
+    $('.label', card).textContent = a.label || (a.task ? trunc(oneLine(a.task), 60) : '');
+    $('.label', card).title = a.task || '';
+    const win = s.judge && s.judge.winner === i;
+    card.classList.toggle('win', !!win); $('.badge', card).hidden = !win;
+    const img = $('img', card), ph = $('.ph', card);
+    const shot = last && last.screenshot ? fileUrl(last.screenshot) : null;
+    if (shot) { if (img.getAttribute('src') !== shot) img.src = shot; img.hidden = false; ph.hidden = true; }
+    else { img.hidden = true; ph.hidden = false; ph.textContent = last ? 'no screenshot for this step' : (a.status === 'crashed' ? 'crashed before its first step' : 'waiting for the first screenshot…'); }
+    $('.action .n', card).textContent = last ? `step ${(last.index ?? a.steps.length - 1) + 1}` : (a.status === 'running' ? 'starting…' : '');
+    $('.action .a', card).textContent = last ? last.action : '';
+    $('.action .t', card).textContent = last ? `t=${fmtT(last.t)}` : '';
+    $('.thought', card).textContent = last ? oneLine(last.thought) : '';
+    const err = $('.err', card); const e = last && last.error;
+    err.hidden = !e; err.textContent = e ? '!! ' + e : '';
+    const ans = $('.ans', card);
+    if (a.status && a.status !== 'running') {
+      const ok = a.status === 'done';
+      ans.hidden = false; ans.className = 'ans' + (ok ? '' : ' bad');
+      ans.textContent = ok ? (a.answer || '(empty answer)') : (a.error ? a.error : `ended: ${a.status}${a.answer ? ' — ' + a.answer : ''}`);
+    } else ans.hidden = true;
+  }
+  for (const [i, card] of view.cards) if (!seen.has(i)) { card.remove(); view.cards.delete(i); }
+  // keep DOM order = agent order
+  s.order.forEach(i => grid.appendChild(view.cards.get(i)));
+}
+function subtaskForAgent(s, index) {
+  const a = s.agents[index]; if (!a) return null;
+  for (const st of (s.dag?.subtasks || [])) if (st.agent_index === index) return st.id;
+  for (const w of s.waves) for (const st of w.subtasks) if (st.label === a.label) return st.id;
+  return null;
+}
+
+// --- result --------------------------------------------------------------
+function renderResult(s) {
+  const el = $('#result');
+  if (!s.finished) { el.hidden = true; return; }
+  el.hidden = false;
+  const f = s.finished, t = f.timing || {}, u = f.usage;
+  const model = t.total_model_seconds || 0, browser = t.total_browser_seconds || 0, queue = t.total_model_queue_seconds || 0;
+  const tot = model + browser || 1;
+  const pct = x => Math.round(x / tot * 100);
+  const contrib = (f.contributing_indices || []).map(i => `agent ${i}`).join(', ');
+  el.innerHTML = `<h2>Result</h2><div class="grid"><div>
+      <div class="answer ${f.answer == null ? 'none' : ''}">${f.answer == null ? 'No answer' : esc(f.answer)}</div>
+      <div class="reason">${esc(f.reason || '')}${contrib ? ` · from ${contrib}` : ''}</div>
+    </div><div>
+      <table>
+        <tr><td>wall clock</td><td>${(t.wall_seconds ?? 0).toFixed(1)}s</td></tr>
+        <tr><td>sum of agent wall</td><td>${(t.sum_agent_wall_seconds ?? 0).toFixed(1)}s</td></tr>
+        <tr><td>concurrency achieved</td><td>${(t.speedup_vs_serial ?? 0).toFixed(2)}×</td></tr>
+        <tr><td>peak browsers / model in flight</td><td>${t.peak_concurrent_browsers ?? '–'} / ${t.peak_inflight_model_requests ?? '–'}</td></tr>
+        ${u ? `<tr><td>API calls</td><td>${u.calls}/${u.limit}${u.non_agent_calls ? ` (${u.non_agent_calls} planning)` : ''}</td></tr><tr><td>tokens</td><td>${u.total_tokens} (${u.image_tokens} image)</td></tr>` : '<tr><td>API usage</td><td>none (mock)</td></tr>'}
+      </table>
+      <div class="bar"><div class="m" style="width:${pct(model - queue)}%"></div><div class="q" style="width:${pct(queue)}%"></div><div class="b" style="width:${pct(browser)}%"></div></div>
+      <div class="barlbl"><span><i style="background:var(--accent)"></i>model ${(model - queue).toFixed(1)}s</span>${queue > 0.05 ? `<span><i style="background:var(--running)"></i>queued ${queue.toFixed(1)}s</span>` : ''}<span><i style="background:var(--done)"></i>browser ${browser.toFixed(1)}s</span></div>
+    </div></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// live: the launch form
+// ---------------------------------------------------------------------------
+const form = $('#launch');
+function specFromForm() {
+  const f = new FormData(form), g = k => f.get(k);
+  const strategy = g('strategy');
+  const spec = {
+    task: g('task') || '', start_url: g('start_url') || null, strategy, policy: g('policy'),
+    n: +g('n') || 3, max_steps: +g('max_steps') || 8, max_browsers: +g('max_browsers') || 4,
+    judge: g('judge') || 'mock', planning_budget: +g('planning_budget') || 0, max_subtasks: +g('max_subtasks') || 6,
+    max_calls: strategy === 'dag' ? (+g('max_calls_dag') || 200) : (+g('max_calls') || 100),
+  };
+  if (!spec.start_url) delete spec.start_url;
+  return spec;
+}
+function syncFormVisibility() {
+  const strategy = form.strategy.value;
+  form.querySelectorAll('.only-dag').forEach(el => el.style.display = strategy === 'dag' ? '' : 'none');
+  form.querySelectorAll('.only-bon').forEach(el => el.style.display = strategy === 'best_of_n' ? '' : 'none');
+}
+let estimateTimer = 0;
+async function refreshEstimate() {
+  const box = $('#estimate'), btn = $('#start-btn');
+  const spec = specFromForm();
+  if (!spec.task.trim()) { box.className = 'estimate'; box.textContent = 'Enter a task.'; btn.disabled = true; return; }
+  try {
+    const e = await api('/api/estimate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(spec) });
+    if (e.free) { box.className = 'estimate free'; box.innerHTML = `<b>Free</b> — ${esc(e.breakdown)}.`; btn.disabled = false; }
+    else if (!e.api_configured) { box.className = 'estimate blocked'; box.innerHTML = `<b>Needs the PP API</b> — ${esc(e.breakdown)}, but PPAPI_KEY / PPAPI_BASE_URL are not set. Use policy <b>mock</b> with <b>best_of_n</b>, or configure .env and restart the server.`; btn.disabled = true; }
+    else { box.className = 'estimate paid'; box.innerHTML = `<b>Up to ${e.calls} API calls</b> — ${esc(e.breakdown)}. An upper bound; agents that finish early make fewer.`; btn.disabled = false; }
+  } catch (err) { box.className = 'estimate blocked'; box.textContent = 'estimate failed: ' + err.message; btn.disabled = true; }
+}
+form.addEventListener('input', () => { syncFormVisibility(); clearTimeout(estimateTimer); estimateTimer = setTimeout(refreshEstimate, 250); });
+$('#preset').addEventListener('change', e => {
+  const p = view.presets.find(x => x.key === e.target.value); if (!p) return;
+  form.task.value = p.task; form.start_url.value = p.start_url; form.max_steps.value = p.steps;
+  form.strategy.value = p.strategy || 'best_of_n'; form.max_subtasks.value = p.max_subtasks || 6;
+  $('#launch-hint').textContent = p.why;
+  syncFormVisibility(); refreshEstimate();
+});
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('#start-btn'); btn.disabled = true; btn.textContent = 'starting…';
+  try {
+    const r = await api('/api/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(specFromForm()) });
+    await loadRunList();
+    openRun(r.run_id);
+    setSide('runs');
+  } catch (err) { $('#launch-hint').textContent = 'could not start: ' + err.message; }
+  finally { btn.disabled = false; btn.textContent = 'Start run'; }
+});
+async function loadPresets() {
+  try { view.presets = await api('/api/presets'); } catch (e) { view.presets = []; }
+  $('#preset').innerHTML = '<option value="">— custom —</option>' + view.presets.map(p => `<option value="${esc(p.key)}">${esc(p.key)} · ${esc(trunc(p.task, 48))}</option>`).join('');
+}
+
+// ---------------------------------------------------------------------------
+// mode / side tabs
+// ---------------------------------------------------------------------------
+function setMode(mode) {
+  document.querySelectorAll('#mode-tabs button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  setSide(mode === 'live' ? 'new' : 'runs');
+}
+function setSide(side) {
+  document.querySelectorAll('.side-tabs button').forEach(b => b.classList.toggle('on', b.dataset.side === side));
+  $('#runlist').hidden = side !== 'runs'; form.hidden = side !== 'new';
+  if (side === 'new') { syncFormVisibility(); refreshEstimate(); }
+}
+document.querySelectorAll('#mode-tabs button').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+document.querySelectorAll('.side-tabs button').forEach(b => b.addEventListener('click', () => setSide(b.dataset.side)));
+
+// boot
+loadPresets(); loadRunList(); syncFormVisibility();
+if (location.hash.length > 1) openRun(decodeURIComponent(location.hash.slice(1)));
+</script>
+</body>
+</html>

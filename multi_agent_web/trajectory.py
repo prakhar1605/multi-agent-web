@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,6 +95,7 @@ class Trajectory:
         task: str,
         config: RunConfig | None = None,
         run_dir: Path | None = None,
+        on_record: Callable[[Step], None] | None = None,
     ) -> None:
         self.task = task
         self.config = config or RunConfig()
@@ -101,6 +103,10 @@ class Trajectory:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.steps_path = self.run_dir / "steps.jsonl"
         self.steps: list[Step] = []
+        # Called with each step once it is fully recorded -- index assigned,
+        # screenshot saved, error and timing set. The orchestrator uses this to
+        # announce steps to a live viewer. None (the default) changes nothing.
+        self.on_record = on_record
 
         self._write_json(
             self.run_dir / "meta.json",
@@ -130,6 +136,8 @@ class Trajectory:
         with self.steps_path.open("a", encoding="utf-8") as fh:
             fh.write(step.model_dump_json() + "\n")
         logger.info("%s", step.summary())
+        if self.on_record is not None:
+            self.on_record(step)
         return step
 
     def save_final_screenshot(self, screenshot: Image.Image) -> None:
@@ -182,4 +190,7 @@ def load_trajectory(run_dir: Path) -> list[Step]:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Milliseconds, so that agents launched together in one multi-agent run can
+    # be aligned on a replay timeline. Still ISO-8601; anything that parsed the
+    # old whole-second stamps parses these.
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")

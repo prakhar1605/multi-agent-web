@@ -70,6 +70,14 @@ class BestOfN(Strategy):
         else:
             logger.info("best_of_n: agent %d won -- %s", winner.index, verdict.reason)
 
+        runner.sink.emit(
+            "judge_decision",
+            name=self.judge.name,
+            winner=verdict.index,
+            reason=verdict.reason,
+            candidates=[c.as_dict() for c in candidates],
+        )
+
         return StrategyOutcome(
             answer=winner.answer if winner else None,
             contributing_indices=[winner.index] if winner else [],

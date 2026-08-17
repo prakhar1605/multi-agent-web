@@ -1,9 +1,14 @@
-# Phase 1 dependencies. No model runtime here on purpose: MolmoWeb is driven
-# over HTTP, so torch/transformers live on the GPU host, not in this repo.
+# Core. No model runtime here on purpose: MolmoWeb is driven over HTTP, so
+# torch/transformers live on the GPU host, not in this repo.
 playwright>=1.48
 pydantic>=2.7
 pillow>=10.0
 httpx>=0.27
+
+# Web viewer (scripts/serve_ui.py). Only needed to run the UI; the orchestrator,
+# the CLIs and the whole test suite import neither.
+fastapi>=0.110
+uvicorn[standard]>=0.27
 
 # Testing
 pytest>=8.0

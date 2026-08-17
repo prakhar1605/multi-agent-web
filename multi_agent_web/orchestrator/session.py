@@ -43,6 +43,7 @@ from ..browser import BrowserSession, PageInfo
 from ..config import RunConfig
 from ..policy.base import AgentPolicy
 from ..trajectory import Step, Trajectory
+from .events import EventSink
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,7 @@ class AgentSession:
         run_config: RunConfig,
         run_dir: Path,
         slot: ModelSlot | None = None,
+        sink: EventSink | None = None,
     ) -> None:
         self.index = index
         self.spec = spec
@@ -260,6 +262,32 @@ class AgentSession:
         )
         self._inner_policy = policy
         self.pool = pool
+        # Observe-only. The default discards everything; see events.py.
+        self.sink = sink or EventSink()
+
+    def _announce_step(self, step: Step) -> None:
+        """Trajectory -> sink. Called after the step is fully recorded."""
+        self.sink.emit(
+            "agent_step",
+            index=self.index,
+            step={
+                "index": step.index,
+                "thought": step.thought,
+                "action": step.action.summary(),
+                "action_json": step.action.model_dump(mode="json"),
+                "error": step.error,
+                # Relative to the RUN directory, so a viewer can fetch it
+                # without knowing how agent directories are named.
+                "screenshot": (
+                    f"{self.run_dir.name}/{step.screenshot}" if step.screenshot else None
+                ),
+                "url": step.url,
+                "title": step.title,
+                "model_seconds": step.model_seconds,
+                "model_queue_seconds": step.model_queue_seconds,
+                "browser_seconds": step.browser_seconds,
+            },
+        )
 
     async def run(self) -> SessionResult:
         """Run this agent to completion. Never raises.
@@ -272,7 +300,10 @@ class AgentSession:
         try:
             await browser.start()
             trajectory = Trajectory(
-                task=self.spec.task, config=self.run_config, run_dir=self.run_dir
+                task=self.spec.task,
+                config=self.run_config,
+                run_dir=self.run_dir,
+                on_record=self._announce_step,
             )
             agent = Agent(
                 policy=self.policy, browser=browser, config=self.run_config

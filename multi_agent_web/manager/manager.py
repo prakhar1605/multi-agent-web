@@ -219,10 +219,17 @@ class Manager:
 
     # --- hook 1: decompose -------------------------------------------------
 
-    async def decompose(self, task: str) -> DAG:
-        """Turn the goal into a validated graph, or fail loudly."""
+    async def decompose(self, task: str, start_url: str | None = None) -> DAG:
+        """Turn the goal into a validated graph, or fail loudly.
+
+        ``start_url`` is where every agent will begin. Telling the manager
+        lets it write instructions that name the site rather than instructions
+        that assume the agent will find it -- and it costs nothing when the
+        strategy has no start URL to give.
+        """
+        start = f"# START PAGE\nEvery agent begins at {start_url}\n\n" if start_url else ""
         user = (
-            f"# GOAL\n{task}\n\n"
+            f"# GOAL\n{task}\n\n{start}"
             f"# YOUR JOB\nBreak this into at most {self.config.max_subtasks} "
             f"subtasks and reply with the JSON object."
         )
@@ -236,7 +243,10 @@ class Manager:
     # --- hook 2: replan ----------------------------------------------------
 
     async def replan(
-        self, dag: DAG, outcomes: Sequence[SubtaskOutcome]
+        self,
+        dag: DAG,
+        outcomes: Sequence[SubtaskOutcome],
+        wave: int | None = None,
     ) -> Replan | None:
         """Propose edits after a wave, or ``None`` if there are to be none.
 
@@ -245,7 +255,7 @@ class Manager:
         ablation), the model proposed nothing, or the model proposed more than
         the budget can afford. Every one of them is recorded in ``history``, so
         run.json can distinguish "the manager was happy" from "the manager was
-        overruled".
+        overruled". ``wave`` is stamped on the record so a viewer can place it.
         """
         if self.budget.exhausted:
             logger.info(
@@ -260,6 +270,8 @@ class Manager:
                         f"({self.budget.spent}/{self.budget.limit} edits used)"
                     ),
                     "called_model": False,
+                    "wave": wave,
+                    "outcome": "budget exhausted",
                 }
             )
             return None
@@ -274,7 +286,7 @@ class Manager:
             logger.info("manager kept the plan unchanged: %s", replan.reason)
             self.history.append(
                 {**replan.as_dict(), "applied": False, "called_model": True,
-                 "outcome": "no change proposed"}
+                 "wave": wave, "outcome": "no change proposed"}
             )
             return None
 
@@ -288,6 +300,7 @@ class Manager:
             self.budget.refused += replan.edits
             self.history.append(
                 {**replan.as_dict(), "applied": False, "called_model": True,
+                 "wave": wave,
                  "outcome": (
                      f"refused: costs {replan.edits} edit(s), "
                      f"{self.budget.remaining} remain")}

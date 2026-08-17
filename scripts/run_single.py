@@ -21,7 +21,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from multi_agent_web.actions import Click, Done, Scroll, Type  # noqa: E402
 from multi_agent_web.agent import run_task  # noqa: E402
 from multi_agent_web.config import (  # noqa: E402
     MolmoWebConfig,
@@ -31,17 +30,12 @@ from multi_agent_web.config import (  # noqa: E402
 from multi_agent_web.policy.base import AgentPolicy  # noqa: E402
 from multi_agent_web.policy.mock import MockPolicy  # noqa: E402
 
-DEMO_PAGE = REPO_ROOT / "tests" / "fixtures" / "demo_page.html"
-DEFAULT_START_URL = DEMO_PAGE.as_uri() if DEMO_PAGE.exists() else "https://example.com"
+# The demo page and the script MockPolicy replays on it live in the package,
+# so the CLIs and the web UI drive the same control. Re-exported here because
+# other scripts import them from this module.
+from multi_agent_web.presets import DEMO_PAGE, DEMO_SCRIPT  # noqa: E402,F401
 
-# Coordinates below match the bundled demo page. They are nonsense on any other
-# site -- which is exactly what a mock policy is: a control, not a browser agent.
-DEMO_SCRIPT = [
-    ("The search box is near the top-left; click it to focus.", Click(x=150, y=120)),
-    ("Type the query and submit it.", Type(text="multi-agent web", press_enter=True)),
-    ("Scroll down to see the rest of the page.", Scroll.by("down", 600)),
-    ("Nothing left in the script.", Done(answer="mock run finished")),
-]
+DEFAULT_START_URL = DEMO_PAGE.as_uri() if DEMO_PAGE.exists() else "https://example.com"
 
 
 def build_policy(name: str, endpoint: str | None = None) -> AgentPolicy:

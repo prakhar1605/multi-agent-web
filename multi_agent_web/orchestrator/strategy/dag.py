@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any
 from ...manager.manager import Manager, format_context
 from ...manager.plan import DAG, InvalidPlan, Subtask, SubtaskOutcome
 from ...ppapi import CallBudgetExceeded, PPAPIError
+from ..events import EventSink
 from ..session import SessionResult, SessionSpec
 from .base import Strategy, StrategyOutcome
 
@@ -87,8 +88,10 @@ class DagStrategy(Strategy):
         self.max_waves = max_waves or manager.config.max_waves
 
     async def run(self, task: str, runner: "Runner") -> StrategyOutcome:
-        dag = await self.manager.decompose(task)
+        sink = runner.sink
+        dag = await self.manager.decompose(task, start_url=self.start_url)
         initial = dag.as_dict()
+        sink.emit("plan_created", dag=initial, manager=self.manager.as_dict())
 
         sessions: list[SessionResult] = []
         outcomes: list[SubtaskOutcome] = []
@@ -123,16 +126,24 @@ class DagStrategy(Strategy):
                     "dag: %d subtask(s) blocked by an upstream failure: %s",
                     len(blocked), [s.id for s in blocked],
                 )
+            statuses = {s.id: s.status for s in ready}
             waves.append(
                 {
                     "wave": wave,
                     "subtasks": [s.id for s in ready],
-                    "statuses": {s.id: s.status for s in ready},
+                    "statuses": statuses,
                     "blocked": [s.id for s in blocked],
                 }
             )
+            sink.emit(
+                "wave_finished",
+                wave=wave,
+                statuses=statuses,
+                blocked=[s.id for s in blocked],
+                dag=dag.as_dict(),
+            )
 
-            dag = await self._maybe_replan(dag, outcomes, wave)
+            dag = await self._maybe_replan(dag, outcomes, wave, sink)
 
         answer, contributing, reason = _aggregate(dag, stopped_early)
         return StrategyOutcome(
@@ -163,7 +174,7 @@ class DagStrategy(Strategy):
             SessionSpec(
                 task=self._instruction_with_context(subtask, dag),
                 start_url=self.start_url,
-                label=f"wave {wave}: {subtask.id}",
+                label=subtask_label(wave, subtask.id),
             )
             for subtask in ready
         ]
@@ -173,6 +184,15 @@ class DagStrategy(Strategy):
         )
         for subtask in ready:
             subtask.status = "running"
+        # Agent indices are not known until the Runner assigns them, so the
+        # label is the join key: it appears on this event and on each agent's
+        # ``agent_started``, and a viewer pairs the two.
+        runner.sink.emit(
+            "wave_started",
+            wave=wave,
+            subtasks=[{"id": s.id, "label": subtask_label(wave, s.id)} for s in ready],
+            dag=dag.as_dict(),
+        )
 
         results = await runner.run_sessions(specs)
 
@@ -212,7 +232,7 @@ class DagStrategy(Strategy):
     # --- replanning --------------------------------------------------------
 
     async def _maybe_replan(
-        self, dag: DAG, outcomes: list[SubtaskOutcome], wave: int
+        self, dag: DAG, outcomes: list[SubtaskOutcome], wave: int, sink: EventSink
     ) -> DAG:
         """Ask the manager for edits and apply them, or keep the current graph.
 
@@ -221,7 +241,7 @@ class DagStrategy(Strategy):
         decides whether what it proposed is a graph we can still run.
         """
         try:
-            replan = await self.manager.replan(dag, outcomes)
+            replan = await self.manager.replan(dag, outcomes, wave=wave)
         except (PPAPIError, CallBudgetExceeded) as exc:
             # The manager broke or the API budget ran dry partway through. Both
             # are recorded and neither is fatal: waves that already ran are paid
@@ -229,6 +249,7 @@ class DagStrategy(Strategy):
             # advice. Contrast ``decompose``, where a failure IS fatal -- there
             # is no plan to fall back on, and nothing has been spent yet.
             logger.error("dag: manager failed to replan at wave %d -- %s", wave, exc)
+            outcome = f"failed: {type(exc).__name__}: {exc}"
             self.manager.history.append(
                 {
                     "reason": "",
@@ -238,13 +259,42 @@ class DagStrategy(Strategy):
                     "applied": False,
                     "called_model": True,
                     "wave": wave,
-                    "outcome": f"failed: {type(exc).__name__}: {exc}",
+                    "outcome": outcome,
                 }
             )
+            sink.emit("replan_refused", wave=wave, reason="", add=[], remove=[],
+                      edits=0, outcome=outcome)
             return dag
 
         if replan is None:
+            # The manager recorded why (budget spent, no change, unaffordable).
+            record = self.manager.history[-1] if self.manager.history else {}
+            payload = {
+                "wave": wave,
+                "reason": record.get("reason", ""),
+                "add": record.get("add", []),
+                "remove": record.get("remove", []),
+                "edits": record.get("edits", 0),
+                "outcome": record.get("outcome", ""),
+                "called_model": bool(record.get("called_model")),
+            }
+            if payload["edits"]:
+                # It DID propose something; the budget could not cover it.
+                sink.emit("replan_proposed", **{k: payload[k] for k in
+                                                ("wave", "reason", "add", "remove", "edits")})
+                sink.emit("replan_refused", **payload)
+            else:
+                sink.emit("replan_skipped", **payload)
             return dag
+
+        proposed = {
+            "wave": wave,
+            "reason": replan.reason,
+            "add": [s.as_dict() for s in replan.add],
+            "remove": list(replan.remove),
+            "edits": replan.edits,
+        }
+        sink.emit("replan_proposed", **proposed)
 
         try:
             edited = dag.apply(replan)
@@ -257,6 +307,7 @@ class DagStrategy(Strategy):
                 "dag: refusing the manager's replan at wave %d -- %s", wave, exc
             )
             self.manager.record_rejected(replan, wave, str(exc))
+            sink.emit("replan_refused", **proposed, outcome=f"rejected: {exc}")
             return dag
 
         self.manager.record_applied(replan, wave)
@@ -269,7 +320,20 @@ class DagStrategy(Strategy):
         # blocking now rather than at the top of the next wave -- otherwise a
         # subtask hung off a failed dependency would look runnable for a moment.
         edited.propagate_blocked()
+        sink.emit(
+            "replan_applied",
+            **proposed,
+            dag=edited.as_dict(),
+            budget=self.manager.budget.as_dict(),
+        )
         return edited
+
+
+def subtask_label(wave: int, subtask_id: str) -> str:
+    """The label a subtask's agent carries. One place, because it is a join key:
+    ``wave_started`` and ``agent_started`` events both carry it, and a viewer
+    pairs a DAG node with its agent by matching the two."""
+    return f"wave {wave}: {subtask_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -377,4 +441,4 @@ def _growth(
     }
 
 
-__all__ = ["DagStrategy"]
+__all__ = ["DagStrategy", "subtask_label"]

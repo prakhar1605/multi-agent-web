@@ -18,6 +18,7 @@ nothing about browsers.
 
 from __future__ import annotations
 
+from .events import Event, EventSink, RecordingSink, load_events
 from .judge.base import Candidate, Judge, Verdict
 from .judge.llm import LLMJudge
 from .judge.mock import MockJudge
@@ -51,6 +52,8 @@ __all__ = [
     "BrowserPool",
     "Candidate",
     "DagStrategy",
+    "Event",
+    "EventSink",
     "Judge",
     "LLMJudge",
     "MockJudge",
@@ -59,6 +62,7 @@ __all__ = [
     "OrchestrationTiming",
     "OrchestratorConfig",
     "PolicyFactory",
+    "RecordingSink",
     "Runner",
     "SessionResult",
     "SessionSpec",
@@ -67,6 +71,7 @@ __all__ = [
     "StrategyOutcome",
     "ThrottledPolicy",
     "Verdict",
+    "load_events",
     "orchestrate",
     "write_run_json",
 ]

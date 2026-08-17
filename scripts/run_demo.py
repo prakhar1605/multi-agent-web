@@ -92,83 +92,22 @@ from playwright.async_api import Browser as PWBrowser  # noqa: E402
 from playwright.async_api import Playwright, async_playwright  # noqa: E402
 
 from multi_agent_web.browser import BrowserSession, PageInfo  # noqa: E402
-from multi_agent_web.config import ManagerConfig, QwenConfig, RunConfig  # noqa: E402
-from multi_agent_web.manager import Manager  # noqa: E402
+from multi_agent_web.config import RunConfig  # noqa: E402
+from multi_agent_web.launch import (  # noqa: E402
+    LaunchError,
+    LaunchSpec,
+    estimate_calls,
+    prepare,
+)
 from multi_agent_web.orchestrator import (  # noqa: E402
-    BestOfN,
-    DagStrategy,
-    MockJudge,
     OrchestrationResult,
-    OrchestratorConfig,
     Runner,
     write_run_json,
 )
 from multi_agent_web.orchestrator.runner import summarise_timing  # noqa: E402
 from multi_agent_web.policy.base import AgentPolicy  # noqa: E402
-from multi_agent_web.policy.mock import MockPolicy  # noqa: E402
-from multi_agent_web.ppapi import CallBudget, PPAPIClient  # noqa: E402
+from multi_agent_web.presets import DEMO_PAGE, PRESETS  # noqa: E402
 from multi_agent_web.trajectory import Step, make_run_dir  # noqa: E402
-
-from run_single import DEMO_SCRIPT  # noqa: E402
-
-DEMO_PAGE = REPO_ROOT / "tests" / "fixtures" / "demo_page.html"
-
-
-# ---------------------------------------------------------------------------
-# presets
-# ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class Preset:
-    key: str
-    task: str
-    start_url: str
-    why: str
-    steps: int
-
-
-PRESETS: dict[str, Preset] = {
-    "local": Preset(
-        key="local",
-        task="Type \"multi-agent web\" into the search box, submit it, then "
-        "report exactly what the page says was submitted.",
-        start_url=DEMO_PAGE.as_uri(),
-        why="Bundled local page. No network, no API variance -- rehearse the "
-        "recording and check tiling for free before spending anything.",
-        steps=5,
-    ),
-    "wikipedia": Preset(
-        key="wikipedia",
-        task="Find out which year the Eiffel Tower was completed, and report "
-        "just the year.",
-        start_url="https://en.wikipedia.org/wiki/Main_Page",
-        why="Stable, plain HTML, no cookie wall and no bot check in the US, and "
-        "tolerant of four concurrent readers. Genuinely multi-step -- agents "
-        "must search, open an article and read a fact -- so they diverge on "
-        "route (search box vs. direct navigation, infobox vs. body text), "
-        "which is the point of best-of-N.",
-        steps=8,
-    ),
-    "bookstore": Preset(
-        key="bookstore",
-        task="Find the book titled \"A Light in the Attic\" and report its price.",
-        start_url="https://books.toscrape.com/",
-        why="A site published specifically as a scraping/automation sandbox, so "
-        "using it is unambiguously fine and it will not throw a bot check. "
-        "Catalogue -> product page -> read a field is the classic shopping "
-        "pattern, and the grid of near-identical covers makes agents genuinely "
-        "diverge: some click the cover, some the title link, some search first.",
-        steps=8,
-    ),
-    "hackernews": Preset(
-        key="hackernews",
-        task="Report the title of the current number one story on the front page.",
-        start_url="https://news.ycombinator.com/",
-        why="About as static and lightweight as the web gets: no JavaScript "
-        "needed, no banners, no login. Short and highly reliable, so it makes a "
-        "good opener or a fallback if a longer task is going badly on the day.",
-        steps=5,
-    ),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -875,43 +814,15 @@ async def preflight(pool: TiledBrowserPool, run_config: RunConfig) -> bool:
 # ---------------------------------------------------------------------------
 # cost guard
 # ---------------------------------------------------------------------------
-def call_ceiling(args: argparse.Namespace, max_steps: int) -> tuple[int, str]:
-    """Upper bound on API calls for this run, and how it is arrived at.
-
-    Two spenders under ``--strategy dag``, and the agent count is not ``--n``:
-    the manager decides how many subtasks there are (up to ``--max-subtasks``)
-    and may add up to ``--planning-budget`` more, each of which is another whole
-    agent. Budgeting for ``--n`` there would abort a legitimate run partway
-    through, which is a worse failure than quoting a larger number up front.
-    """
-    if args.strategy == "dag":
-        agents = args.max_subtasks + args.planning_budget
-        planning = 1 + args.max_waves  # one decompose, then one replan per wave
-        return (
-            agents * max_steps + planning,
-            f"up to ({args.max_subtasks} subtasks + {args.planning_budget} added) "
-            f"x {max_steps} steps, plus {planning} manager calls",
-        )
-    return (
-        args.n * max_steps,
-        f"up to {args.n} agents x {max_steps} steps",
-    )
-
-
 def confirm_cost(
-    policy: str,
-    estimate: int,
-    breakdown: str,
-    assume_yes: bool,
-    narrator: Narrator,
-    force_prompt: bool = False,
+    estimate_calls_: int, breakdown: str, free: bool, assume_yes: bool, narrator: Narrator
 ) -> None:
-    """Ask before spending. ``force_prompt`` covers ``--policy mock
-    --strategy dag``, where the agents are free but the manager is not."""
-    if policy == "mock" and not force_prompt:
+    """Ask before spending. Free runs (mock policy, mock judge) never ask;
+    a mock-agent dag run still does, because the manager is an LLM."""
+    if free:
         return
     print(
-        f"\n  {narrator.strong('cost estimate')}: {breakdown} = {estimate} API calls\n"
+        f"\n  {narrator.strong('cost estimate')}: {breakdown} = {estimate_calls_} API calls\n"
         f"  (an upper bound -- agents that finish early make fewer)"
     )
     if assume_yes:
@@ -929,70 +840,15 @@ def confirm_cost(
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
-def build_api(max_calls: int) -> tuple[QwenConfig, CallBudget]:
-    """Connection settings and ONE budget for everything this run spends on.
-
-    Shared by the agents and, under ``--strategy dag``, the manager -- so the
-    ceiling bounds the run rather than each spender separately, and the demo's
-    usage line is the whole bill.
-    """
-    config = QwenConfig.from_env(max_calls_per_run=max(max_calls, 1))
-    if config is None:
-        raise SystemExit(
-            "PPAPI_KEY and PPAPI_BASE_URL must both be set (.env or environment)."
-        )
-    return config, CallBudget(limit=config.max_calls_per_run)
-
-
-def build_policy_factory(
-    name: str,
-    narrator: Narrator,
-    qwen: QwenConfig | None = None,
-    budget: CallBudget | None = None,
-):
-    """Returns a factory. Always a factory, never a policy."""
-    if name == "mock":
-        return lambda index: NarratingPolicy(MockPolicy(DEMO_SCRIPT), index, narrator)
-
-    if name == "qwen":
-        from multi_agent_web.policy.qwen import QwenPolicy
-
-        assert qwen is not None and budget is not None  # set up by the caller
-        return lambda index: NarratingPolicy(
-            QwenPolicy(qwen, budget=budget, agent_index=index), index, narrator
-        )
-
-    raise ValueError(f"unknown policy for the demo: {name}")
-
-
-def build_strategy(
-    args: argparse.Namespace,
-    start_url: str,
-    api: PPAPIClient | None,
-) -> BestOfN | DagStrategy:
-    """best-of-N stays the default, so nothing that already works changes."""
-    if args.strategy == "best_of_n":
-        return BestOfN(n=args.n, judge=MockJudge(), start_url=start_url)
-
-    assert api is not None  # dag always needs the API; run_demo checks first
-    manager = Manager(
-        api,
-        ManagerConfig.from_env(
-            planning_budget=args.planning_budget,
-            max_subtasks=args.max_subtasks,
-            max_waves=args.max_waves,
-            **({"model": args.manager_model} if args.manager_model else {}),
-        ),
-    )
-    return DagStrategy(manager, start_url=start_url)
-
-
 async def run_demo(args: argparse.Namespace) -> int:
     narrator = Narrator(colour=not args.no_color)
     preset = PRESETS[args.preset]
     task = args.task or preset.task
     start_url = args.start_url or preset.start_url
     max_steps = args.max_steps or preset.steps
+    # A preset knows which strategy it was written for; an explicit flag wins.
+    strategy_name = args.strategy or preset.strategy
+    max_subtasks = args.max_subtasks or preset.max_subtasks
 
     width, _, height = args.viewport.partition("x")
     viewport = {"width": int(width), "height": int(height)}
@@ -1012,16 +868,32 @@ async def run_demo(args: argparse.Namespace) -> int:
         # the menu bar even when the size is overridden.
         screen = Screen(detected.left, detected.top, int(sw), int(sh) - detected.top)
 
-    run_config = RunConfig(
+    spec = LaunchSpec(
+        task=task,
+        strategy=strategy_name,
+        policy=args.policy,
+        n=args.n,
+        max_steps=max_steps,
+        start_url=start_url,
+        manager_model=args.manager_model,
+        planning_budget=args.planning_budget,
+        max_subtasks=max_subtasks,
+        max_waves=args.max_waves,
+        headless=args.headless,
         viewport_width=viewport["width"],
         viewport_height=viewport["height"],
-        headless=args.headless,
-        max_steps=max_steps,
-        runs_dir=args.runs_dir,
         # The pause a viewer needs, applied by the browser AFTER each action.
         # Using the existing knob keeps this presentation-only.
         settle_ms=int(args.step_delay * 1000) + 200,
+        max_browsers=args.n,
+        max_model=args.max_model,
+        runs_dir=args.runs_dir,
     )
+    estimate = estimate_calls(spec)
+    # The API ceiling for this run is exactly the estimate: the demo should
+    # never quietly spend more than it just quoted.
+    spec = spec.model_copy(update={"max_calls": max(estimate.calls, 1)})
+    run_config = spec.run_config()
     layout = Layout(
         n=args.n,
         screen=screen,
@@ -1034,9 +906,9 @@ async def run_demo(args: argparse.Namespace) -> int:
     narrator.rule(narrator.strong("multi-agent web — live demo"))
     print(f"  task     : {task}")
     print(f"  start    : {start_url}")
-    if args.strategy == "dag":
+    if strategy_name == "dag":
         print(f"  strategy : dag — a manager LLM decomposes this into subtasks "
-              f"(budget {args.planning_budget} edits)")
+              f"(budget {args.planning_budget} edits, up to {max_subtasks} at first)")
         print(f"  tiles    : {args.n}   policy: {args.policy}   "
               f"max steps: {max_steps}")
     else:
@@ -1055,30 +927,25 @@ async def run_demo(args: argparse.Namespace) -> int:
             f"Use --n {max(1, layout.max_n())}, a larger --screen, or --force."
         )
 
-    estimate, breakdown = call_ceiling(args, max_steps)
-    # The manager is an LLM even when the agents are mocked, so a mock dag run
-    # still spends and still has to ask.
-    needs_api = args.policy == "qwen" or args.strategy == "dag"
-    confirm_cost(
-        args.policy, estimate, breakdown, args.yes, narrator,
-        force_prompt=needs_api and args.policy == "mock",
-    )
+    confirm_cost(estimate.calls, estimate.breakdown, estimate.free, args.yes, narrator)
 
-    qwen, budget = build_api(estimate) if needs_api else (None, None)
-    api = PPAPIClient(qwen, budget=budget) if qwen and args.strategy == "dag" else None
-    usage_provider = budget.as_dict if budget else None
-
-    policy_factory = build_policy_factory(args.policy, narrator, qwen, budget)
-    strategy = build_strategy(args, start_url, api)
+    # Same wiring as run_multi.py and the web UI, plus a narrator around each
+    # agent's policy. Presentation only: the narrator forwards predict untouched.
+    try:
+        prepared = prepare(
+            spec,
+            policy_wrapper=lambda policy, index: NarratingPolicy(policy, index, narrator),
+        )
+    except LaunchError as exc:
+        raise SystemExit(str(exc)) from exc
+    strategy = prepared.strategy
+    usage_provider = prepared.usage_provider
 
     run_dir = make_run_dir(run_config.runs_dir)
     runner = Runner(
-        policy_factory=policy_factory,
+        policy_factory=prepared.policy_factory,
         run_config=run_config,
-        orchestrator_config=OrchestratorConfig(
-            max_concurrent_browsers=args.n,
-            max_inflight_model_requests=args.max_model,
-        ),
+        orchestrator_config=prepared.orchestrator_config,
         run_dir=run_dir,
     )
     # Presentation swap: tiled windows instead of one shared browser. Same
@@ -1096,13 +963,12 @@ async def run_demo(args: argparse.Namespace) -> int:
                 "--no-scale) or pass --force to record anyway."
             )
         narrator.rule(narrator.strong("running"))
-        if args.strategy == "dag":
+        if strategy_name == "dag":
             print("  the manager is planning…", flush=True)
         outcome = await strategy.run(task, runner)
     finally:
         await runner.pool.close()
-        if api is not None:
-            await api.close()
+        await prepared.aclose()
 
     timing = summarise_timing(
         outcome.sessions,
@@ -1246,9 +1112,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--policy", default="qwen", choices=["qwen", "mock"])
     parser.add_argument(
-        "--strategy", default="best_of_n", choices=["best_of_n", "dag"],
+        "--strategy", default=None, choices=["best_of_n", "dag"],
         help="best_of_n: N agents race at the same task. dag: a manager LLM "
-        "decomposes it into a dependency graph, run in waves.",
+        "decomposes it into a dependency graph, run in waves. Default: what "
+        "the preset was written for (best_of_n for all but 'pricecheck').",
     )
     parser.add_argument(
         "--manager-model", default=None,
@@ -1260,7 +1127,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="DAG edits the manager may make (default 10). 0 decomposes but "
         "never replans.",
     )
-    parser.add_argument("--max-subtasks", type=int, default=4)
+    parser.add_argument(
+        "--max-subtasks", type=int, default=None,
+        help="Ceiling on the manager's first plan. Default: the preset's.",
+    )
     parser.add_argument("--max-waves", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument(
