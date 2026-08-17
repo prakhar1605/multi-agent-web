@@ -34,7 +34,7 @@ step); `dir` is then `null`. Always check it before joining a path.
 |---|---|---|
 | `schema_version` | int | Currently `1`. Check before parsing. |
 | `task` | string | The goal, as given by the user. |
-| `strategy` | string | `"best_of_n"` today; `"dag"` in Phase 3. |
+| `strategy` | string | `"best_of_n"` or `"dag"`. Decides the shape of `details`. |
 | `started_at` / `finished_at` | ISO-8601 UTC | Wall-clock bounds of the whole run. |
 | `answer` | string \| null | The reported answer. **`null` is a legitimate outcome** — every agent may have failed. |
 | `contributing_agents` | int[] | Indices whose work the answer rests on. Exactly one for best-of-N; several for a Phase 3 DAG. Empty when there is no answer. |
@@ -50,8 +50,8 @@ step); `dir` is then `null`. Always check it before joining a path.
 |---|---|---|
 | `index` | int | Agent index, matching `agent_<index>/`. Unique within a run. |
 | `dir` | string \| null | Directory name, or `null` if the agent produced none. |
-| `task` | string | This agent's task. Same as the top-level task for best-of-N; a subtask in Phase 3. |
-| `label` | string \| null | Human-readable role, e.g. `"candidate 2/4"`. |
+| `task` | string | This agent's task. Same as the top-level task for best-of-N; for `dag`, the subtask instruction **plus** the context block carrying its dependencies' answers — i.e. the prompt the agent really got. |
+| `label` | string \| null | Human-readable role: `"candidate 2/4"` for best-of-N, `"wave 2: find_price"` for `dag`. |
 | `status` | enum | `done` \| `max_steps` \| `aborted` \| `crashed`. See below. |
 | `answer` | string \| null | Only meaningful when `status == "done"`. |
 | `num_steps` | int | Steps recorded. |
@@ -107,9 +107,13 @@ all agents in a run**, so these are run totals, not per-agent.
   "calls": 8, "limit": 20, "retries": 0,
   "prompt_tokens": 13989, "completion_tokens": 466,
   "reasoning_tokens": 0, "image_tokens": 7056, "total_tokens": 14455,
-  "calls_by_agent": {"0": 4, "1": 4}
+  "calls_by_agent": {"0": 4, "1": 4}, "non_agent_calls": 0
 }
 ```
+
+`non_agent_calls` is `calls` minus everything in `calls_by_agent`: the manager
+LLM and the LLM judge spend from the same pot but have no agent index, so this
+is their share. `0` for a best-of-N run with the mock judge.
 
 `calls` counts every HTTP attempt including retries, because a retried call is
 still a billed call. Reaching `limit` aborts the run deliberately rather than
@@ -138,7 +142,84 @@ only the current screenshot is sent.
 `judge.winner` is `null` when no candidate was acceptable. `candidates` contains
 **every** agent, failures included — that is what the judge saw.
 
-### `dag` (Phase 3, not built)
+### `dag`
 
-Will carry the subtask graph. `contributing_agents` is already a list so that
-an answer synthesised from several leaf agents needs no schema change.
+Carries the subtask graph before and after execution, every replan, and what
+planning cost. `contributing_agents` lists the agents behind every terminal
+subtask that answered — which is why it was a list from the start.
+
+```json
+{
+  "manager": {"name": "manager", "model": "qwen3.5-27b", "max_subtasks": 6,
+              "budget": {"limit": 10, "spent": 1, "remaining": 9,
+                         "refused_edits": 0}},
+  "initial_dag": {"subtasks": [...], "counts": {"pending": 3}},
+  "final_dag":   {"subtasks": [...], "counts": {"done": 3, "failed": 1}},
+  "replans": [
+    {"reason": "price_a failed on a captcha", "add": [...], "remove": [],
+     "edits": 1, "applied": true, "called_model": true, "wave": 1}
+  ],
+  "budget": {"limit": 10, "spent": 1, "remaining": 9, "refused_edits": 0},
+  "waves": [
+    {"wave": 1, "subtasks": ["price_a", "price_b"],
+     "statuses": {"price_a": "failed", "price_b": "done"},
+     "blocked": ["compare"]}
+  ],
+  "growth": {"initial_subtasks": 3, "final_subtasks": 4, "subtasks_added": 1,
+             "subtasks_removed": 0, "net_growth": 1, "waves": 2,
+             "replans_proposed": 2, "replans_applied": 1, "replan_rate": 0.5},
+  "stopped_early": null
+}
+```
+
+#### `subtasks[]`, in both graphs
+
+| Field | Meaning |
+|---|---|
+| `id` | The manager's slug for this piece of work. Stable across replans. |
+| `instruction` | What one agent was told to do. The context block passed to a dependent is *not* included here — it is reconstructed from its dependencies' answers. |
+| `depends_on` | Ids that had to finish first. |
+| `status` | `pending` \| `running` \| `done` \| `failed` \| `blocked`. |
+| `agent_index` | Which agent ran it, matching `agents[].index` and `agent_<index>/`. `null` if it never ran. |
+| `wave` | Which wave it ran in. `null` if it never ran. |
+| `answer` / `error` | The agent's result, or why there is none. |
+
+`blocked` is distinct from `failed` on purpose: a blocked subtask never ran,
+because something it depended on did not complete. "One agent failed and took
+three subtasks with it" and "four agents failed" are different runs, and the
+status is what tells them apart.
+
+`initial_dag` is the decomposition as first emitted; `final_dag` is the same
+graph after every applied replan, carrying the execution record. **`growth` is
+the pair subtracted** — the DAG-growth and replan-rate numbers, precomputed so
+they do not have to be re-derived per run.
+
+#### `replans[]`
+
+One entry per decision point, **including the ones that changed nothing** — a
+manager that declined to replan is a different observation from a manager that
+was never asked, and both appear here:
+
+| Field | Meaning |
+|---|---|
+| `reason` | The manager's own justification, or the system's when no call was made. |
+| `add` / `remove` / `edits` | The proposed change and what it would cost. |
+| `applied` | Whether the graph actually changed. |
+| `called_model` | `false` when the planning budget was already spent, so no API call was made. This is what `--planning-budget 0` looks like. |
+| `outcome` | Present when not applied: `no change proposed`, `refused: costs N edit(s)…`, or `rejected: <validation error>`. |
+
+A `rejected` entry means the manager proposed an edit that would have left an
+invalid graph (a cycle, a dangling dependency, or removing completed work). The
+edit is not applied and **not billed**, the run continues on the plan it had,
+and the validation error is recorded verbatim — a manager prompt problem stays
+visible instead of being straightened out silently.
+
+#### `budget`
+
+The **planning** budget, in DAG edits — not the API budget, which is `usage`.
+`spent + remaining == limit`; `refused_edits` counts edits proposed but not
+affordable. The two budgets bound different things: one caps how much the plan
+may change, the other how much the run may cost.
+
+Note `usage.non_agent_calls` for a DAG run: the manager spends from the same API
+pot as the agents, and that field is its share.

@@ -11,6 +11,12 @@ tiles windows and a policy wrapper that narrates.
     # the real thing
     python scripts/run_demo.py --preset wikipedia --policy qwen --n 4
 
+    # a manager LLM decomposes the task and runs the graph in waves
+    python scripts/run_demo.py --preset bookstore --policy qwen --strategy dag --n 4
+
+``--strategy`` defaults to best_of_n, so every command that worked before still
+does exactly what it did.
+
 HOW THE WINDOWS GET TILED
 -------------------------
 Launch flags do not work, and giving each session its OWN browser would not
@@ -86,9 +92,11 @@ from playwright.async_api import Browser as PWBrowser  # noqa: E402
 from playwright.async_api import Playwright, async_playwright  # noqa: E402
 
 from multi_agent_web.browser import BrowserSession, PageInfo  # noqa: E402
-from multi_agent_web.config import QwenConfig, RunConfig  # noqa: E402
+from multi_agent_web.config import ManagerConfig, QwenConfig, RunConfig  # noqa: E402
+from multi_agent_web.manager import Manager  # noqa: E402
 from multi_agent_web.orchestrator import (  # noqa: E402
     BestOfN,
+    DagStrategy,
     MockJudge,
     OrchestrationResult,
     OrchestratorConfig,
@@ -98,6 +106,7 @@ from multi_agent_web.orchestrator import (  # noqa: E402
 from multi_agent_web.orchestrator.runner import summarise_timing  # noqa: E402
 from multi_agent_web.policy.base import AgentPolicy  # noqa: E402
 from multi_agent_web.policy.mock import MockPolicy  # noqa: E402
+from multi_agent_web.ppapi import CallBudget, PPAPIClient  # noqa: E402
 from multi_agent_web.trajectory import Step, make_run_dir  # noqa: E402
 
 from run_single import DEMO_SCRIPT  # noqa: E402
@@ -596,6 +605,13 @@ class TiledBrowserPool:
     ``TiledSession`` moves that window into its grid slot after it exists.
     Slots are handed out in ``session()`` call order, which under the runner's
     ``asyncio.gather`` is agent-index order, so agent 0 lands top-left.
+
+    Slots wrap at the grid size. Best-of-N asks for exactly N sessions and never
+    reaches the wrap, but a DAG run launches wave after wave and would otherwise
+    ask for slot 5 of a four-cell grid -- and ``Layout.cell`` would place it on a
+    row that does not exist, off the bottom of the screen. Wrapping is safe
+    because a wave's sessions are closed before the next wave opens, so the cell
+    is genuinely free by the time it is handed out again.
     """
 
     def __init__(self, config: RunConfig, layout: Layout) -> None:
@@ -620,7 +636,7 @@ class TiledBrowserPool:
     def session(self, config: RunConfig | None = None) -> BrowserSession:
         if self._browser is None:
             raise RuntimeError("TiledBrowserPool.start() must be awaited first")
-        slot = self._next
+        slot = self._next % max(1, self.layout.n)
         self._next += 1
         return TiledSession(
             config or self.config, self._browser, slot, self.layout, self.geometry
@@ -859,15 +875,43 @@ async def preflight(pool: TiledBrowserPool, run_config: RunConfig) -> bool:
 # ---------------------------------------------------------------------------
 # cost guard
 # ---------------------------------------------------------------------------
+def call_ceiling(args: argparse.Namespace, max_steps: int) -> tuple[int, str]:
+    """Upper bound on API calls for this run, and how it is arrived at.
+
+    Two spenders under ``--strategy dag``, and the agent count is not ``--n``:
+    the manager decides how many subtasks there are (up to ``--max-subtasks``)
+    and may add up to ``--planning-budget`` more, each of which is another whole
+    agent. Budgeting for ``--n`` there would abort a legitimate run partway
+    through, which is a worse failure than quoting a larger number up front.
+    """
+    if args.strategy == "dag":
+        agents = args.max_subtasks + args.planning_budget
+        planning = 1 + args.max_waves  # one decompose, then one replan per wave
+        return (
+            agents * max_steps + planning,
+            f"up to ({args.max_subtasks} subtasks + {args.planning_budget} added) "
+            f"x {max_steps} steps, plus {planning} manager calls",
+        )
+    return (
+        args.n * max_steps,
+        f"up to {args.n} agents x {max_steps} steps",
+    )
+
+
 def confirm_cost(
-    policy: str, n: int, max_steps: int, assume_yes: bool, narrator: Narrator
+    policy: str,
+    estimate: int,
+    breakdown: str,
+    assume_yes: bool,
+    narrator: Narrator,
+    force_prompt: bool = False,
 ) -> None:
-    if policy == "mock":
+    """Ask before spending. ``force_prompt`` covers ``--policy mock
+    --strategy dag``, where the agents are free but the manager is not."""
+    if policy == "mock" and not force_prompt:
         return
-    estimate = n * max_steps
     print(
-        f"\n  {narrator.strong('cost estimate')}: up to {n} agents x {max_steps} "
-        f"steps = {estimate} API calls\n"
+        f"\n  {narrator.strong('cost estimate')}: {breakdown} = {estimate} API calls\n"
         f"  (an upper bound -- agents that finish early make fewer)"
     )
     if assume_yes:
@@ -885,31 +929,62 @@ def confirm_cost(
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
-def build_policy_factory(name: str, n: int, max_steps: int, narrator: Narrator):
-    """Returns ``(factory, usage_provider)``. Always a factory, never a policy."""
-    if name == "mock":
-        return (
-            lambda index: NarratingPolicy(MockPolicy(DEMO_SCRIPT), index, narrator),
-            None,
+def build_api(max_calls: int) -> tuple[QwenConfig, CallBudget]:
+    """Connection settings and ONE budget for everything this run spends on.
+
+    Shared by the agents and, under ``--strategy dag``, the manager -- so the
+    ceiling bounds the run rather than each spender separately, and the demo's
+    usage line is the whole bill.
+    """
+    config = QwenConfig.from_env(max_calls_per_run=max(max_calls, 1))
+    if config is None:
+        raise SystemExit(
+            "PPAPI_KEY and PPAPI_BASE_URL must both be set (.env or environment)."
         )
+    return config, CallBudget(limit=config.max_calls_per_run)
+
+
+def build_policy_factory(
+    name: str,
+    narrator: Narrator,
+    qwen: QwenConfig | None = None,
+    budget: CallBudget | None = None,
+):
+    """Returns a factory. Always a factory, never a policy."""
+    if name == "mock":
+        return lambda index: NarratingPolicy(MockPolicy(DEMO_SCRIPT), index, narrator)
 
     if name == "qwen":
-        from multi_agent_web.policy.qwen import CallBudget, QwenPolicy
+        from multi_agent_web.policy.qwen import QwenPolicy
 
-        config = QwenConfig.from_env(max_calls_per_run=max(n * max_steps, 1))
-        if config is None:
-            raise SystemExit(
-                "PPAPI_KEY and PPAPI_BASE_URL must both be set (.env or environment)."
-            )
-        budget = CallBudget(limit=config.max_calls_per_run)
-        return (
-            lambda index: NarratingPolicy(
-                QwenPolicy(config, budget=budget, agent_index=index), index, narrator
-            ),
-            budget.as_dict,
+        assert qwen is not None and budget is not None  # set up by the caller
+        return lambda index: NarratingPolicy(
+            QwenPolicy(qwen, budget=budget, agent_index=index), index, narrator
         )
 
     raise ValueError(f"unknown policy for the demo: {name}")
+
+
+def build_strategy(
+    args: argparse.Namespace,
+    start_url: str,
+    api: PPAPIClient | None,
+) -> BestOfN | DagStrategy:
+    """best-of-N stays the default, so nothing that already works changes."""
+    if args.strategy == "best_of_n":
+        return BestOfN(n=args.n, judge=MockJudge(), start_url=start_url)
+
+    assert api is not None  # dag always needs the API; run_demo checks first
+    manager = Manager(
+        api,
+        ManagerConfig.from_env(
+            planning_budget=args.planning_budget,
+            max_subtasks=args.max_subtasks,
+            max_waves=args.max_waves,
+            **({"model": args.manager_model} if args.manager_model else {}),
+        ),
+    )
+    return DagStrategy(manager, start_url=start_url)
 
 
 async def run_demo(args: argparse.Namespace) -> int:
@@ -959,7 +1034,14 @@ async def run_demo(args: argparse.Namespace) -> int:
     narrator.rule(narrator.strong("multi-agent web — live demo"))
     print(f"  task     : {task}")
     print(f"  start    : {start_url}")
-    print(f"  agents   : {args.n}   policy: {args.policy}   max steps: {max_steps}")
+    if args.strategy == "dag":
+        print(f"  strategy : dag — a manager LLM decomposes this into subtasks "
+              f"(budget {args.planning_budget} edits)")
+        print(f"  tiles    : {args.n}   policy: {args.policy}   "
+              f"max steps: {max_steps}")
+    else:
+        print(f"  agents   : {args.n}   policy: {args.policy}   "
+              f"max steps: {max_steps}")
     print(f"  display  : measured {chrome}")
     print(f"  layout   : {layout.describe()}")
     print(f"  pacing   : {args.step_delay:.1f}s after each action")
@@ -973,12 +1055,21 @@ async def run_demo(args: argparse.Namespace) -> int:
             f"Use --n {max(1, layout.max_n())}, a larger --screen, or --force."
         )
 
-    confirm_cost(args.policy, args.n, max_steps, args.yes, narrator)
-
-    policy_factory, usage_provider = build_policy_factory(
-        args.policy, args.n, max_steps, narrator
+    estimate, breakdown = call_ceiling(args, max_steps)
+    # The manager is an LLM even when the agents are mocked, so a mock dag run
+    # still spends and still has to ask.
+    needs_api = args.policy == "qwen" or args.strategy == "dag"
+    confirm_cost(
+        args.policy, estimate, breakdown, args.yes, narrator,
+        force_prompt=needs_api and args.policy == "mock",
     )
-    strategy = BestOfN(n=args.n, judge=MockJudge(), start_url=start_url)
+
+    qwen, budget = build_api(estimate) if needs_api else (None, None)
+    api = PPAPIClient(qwen, budget=budget) if qwen and args.strategy == "dag" else None
+    usage_provider = budget.as_dict if budget else None
+
+    policy_factory = build_policy_factory(args.policy, narrator, qwen, budget)
+    strategy = build_strategy(args, start_url, api)
 
     run_dir = make_run_dir(run_config.runs_dir)
     runner = Runner(
@@ -1005,9 +1096,13 @@ async def run_demo(args: argparse.Namespace) -> int:
                 "--no-scale) or pass --force to record anyway."
             )
         narrator.rule(narrator.strong("running"))
+        if args.strategy == "dag":
+            print("  the manager is planning…", flush=True)
         outcome = await strategy.run(task, runner)
     finally:
         await runner.pool.close()
+        if api is not None:
+            await api.close()
 
     timing = summarise_timing(
         outcome.sessions,
@@ -1034,29 +1129,80 @@ async def run_demo(args: argparse.Namespace) -> int:
     return 0 if result.answer is not None else 1
 
 
+def print_dag_summary(details: dict, narrator: Narrator) -> None:
+    """The graph the manager built, what it changed, and what it spent.
+
+    DAG growth and replan rate are the numbers the paper reports, so they go on
+    screen rather than only into run.json -- a recording should show them.
+    """
+    growth = details["growth"]
+    print(f"\n  {narrator.strong('graph')} (manager: {details['manager']['model']})")
+    for subtask in details["final_dag"]["subtasks"]:
+        deps = ", ".join(subtask["depends_on"])
+        mark = {"done": "✓", "failed": "✗", "blocked": "–"}.get(subtask["status"], "?")
+        print(
+            f"    {mark} {subtask['id']:<20} wave {subtask['wave'] or '-'}"
+            + (f"   after: {deps}" if deps else "")
+        )
+        print(f"      {narrator.faint(' '.join(subtask['instruction'].split())[:88])}")
+
+    applied = [r for r in details["replans"] if r.get("applied")]
+    if applied:
+        print(f"\n  {narrator.strong('replans')}")
+        for entry in applied:
+            change = "".join(
+                [f" +{[s['id'] for s in entry['add']]}" if entry.get("add") else "",
+                 f" -{entry['remove']}" if entry.get("remove") else ""]
+            )
+            print(f"    wave {entry.get('wave', '?')}:{change} — {entry.get('reason', '')[:70]}")
+
+    b = details["budget"]
+    print(f"\n  {narrator.strong('planning')}")
+    print(f"    subtasks     {growth['initial_subtasks']} → "
+          f"{growth['final_subtasks']} over {growth['waves']} wave(s)")
+    print(f"    replans      {growth['replans_applied']} of "
+          f"{growth['replans_proposed']} proposed "
+          f"({growth['replan_rate']:.2f} per wave)")
+    print(f"    edit budget  {b['spent']}/{b['limit']}")
+    if details.get("stopped_early"):
+        print(f"    stopped      {details['stopped_early']}")
+
+
 def print_summary(result: OrchestrationResult, narrator: Narrator) -> None:
     narrator.rule(narrator.strong("result"))
+
+    details = result.details or {}
+    is_dag = "final_dag" in details
+    # Under best-of-N one agent wins; under a DAG every terminal subtask
+    # contributes, so the marker has to say something different.
+    credit = "  ← contributed" if is_dag else "  ← judge's pick"
 
     print(f"  {narrator.strong('per agent')}")
     for session in result.sessions:
         mark = "✓" if session.succeeded else "✗"
-        won = "  ← judge's pick" if session.index in result.contributing_indices else ""
+        won = credit if session.index in result.contributing_indices else ""
         answer = " ".join((session.answer or "").split())[:64]
+        label = f"{session.spec.label}  " if is_dag and session.spec.label else ""
         print(
             f"    {narrator.tint(session.index, f'[{session.index}]')} {mark} "
             f"{session.status:<9} {len(session.steps):>2} steps "
-            f"{session.timing.wall_seconds:>6.1f}s  {answer}{narrator.strong(won)}"
+            f"{session.timing.wall_seconds:>6.1f}s  {label}{answer}"
+            f"{narrator.strong(won)}"
         )
         if session.error:
             print(f"         error: {session.error[:100]}")
 
-    judge = (result.details or {}).get("judge", {})
-    print(f"\n  {narrator.strong('judge')} ({judge.get('name', '?')})")
-    print(f"    picked : agent {judge.get('winner')}")
-    print(f"    because: {judge.get('reason', '')}")
+    if is_dag:
+        print_dag_summary(details, narrator)
+    else:
+        judge = details.get("judge", {})
+        print(f"\n  {narrator.strong('judge')} ({judge.get('name', '?')})")
+        print(f"    picked : agent {judge.get('winner')}")
+        print(f"    because: {judge.get('reason', '')}")
 
     print(f"\n  {narrator.strong('answer')}")
-    print(f"    {result.answer}")
+    for line in (result.answer or "(none)").splitlines():
+        print(f"    {line}")
 
     t = result.timing
     total = t.total_model_seconds + t.total_browser_seconds
@@ -1092,8 +1238,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--preset", default="wikipedia", choices=sorted(PRESETS))
     parser.add_argument("--task", default=None, help="Override the preset task.")
     parser.add_argument("--start-url", default=None)
-    parser.add_argument("--n", type=int, default=4, help="How many agents.")
+    parser.add_argument(
+        "--n", type=int, default=4,
+        help="How many agents. Under --strategy dag this is the number of "
+        "TILES: the manager decides how many subtasks there are, and at most "
+        "this many run (and are visible) at once.",
+    )
     parser.add_argument("--policy", default="qwen", choices=["qwen", "mock"])
+    parser.add_argument(
+        "--strategy", default="best_of_n", choices=["best_of_n", "dag"],
+        help="best_of_n: N agents race at the same task. dag: a manager LLM "
+        "decomposes it into a dependency graph, run in waves.",
+    )
+    parser.add_argument(
+        "--manager-model", default=None,
+        help="Model for the dag manager. Default: PPAPI_MANAGER_MODEL, else the "
+        "policy's model.",
+    )
+    parser.add_argument(
+        "--planning-budget", type=int, default=10,
+        help="DAG edits the manager may make (default 10). 0 decomposes but "
+        "never replans.",
+    )
+    parser.add_argument("--max-subtasks", type=int, default=4)
+    parser.add_argument("--max-waves", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument(
         "--step-delay", type=float, default=0.8,

@@ -57,6 +57,12 @@ so the adapter is deliberately defensive: a shared per-run call budget that
 aborts rather than looping, retries with backoff only on 429/5xx, and token
 accounting surfaced into run.json.
 
+That transport now lives in ``multi_agent_web/ppapi.py`` and is shared with the
+Phase 3 manager and judge, which talk to the same API. The wire contract is
+unchanged; ``CallBudget`` and friends are re-exported here so existing imports
+keep working. What stays in this file is the part that is actually about
+*Qwen as a policy*: the prompt, the 0-1000 coordinate space, and the parser.
+
 Parsing keeps the same discipline as ``MolmoWebPolicy``: fail loudly with the
 full raw generation attached, no coercion, no default action. The one tolerance
 added here is markdown fences -- general models wrap JSON in ```json blocks
@@ -65,15 +71,11 @@ regardless of instructions, so a fence is stripped and the strip is logged.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import json
 import logging
-import random
-import re
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -83,12 +85,18 @@ from pydantic import ValidationError
 from ..actions import ACTION_ADAPTER, Action, Click, Scroll
 from ..browser import PageInfo
 from ..config import QwenConfig, RunConfig
+from ..ppapi import (
+    CallBudget,
+    CallBudgetExceeded,
+    PPAPIClient,
+    PPAPIError,
+    extract_message_text,
+    strip_code_fence,
+)
 from ..trajectory import Step
 from .base import AgentPolicy
 
 logger = logging.getLogger(__name__)
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
 
 #: Qwen-VL emits points on a 0-1000 grid. See the module docstring.
 NORMALIZED_SCALE = 1000.0
@@ -167,88 +175,15 @@ centre.", "action": {{"type": "click", "point": [532, 674]}}}}
 """
 
 
-class QwenProtocolError(RuntimeError):
+class QwenProtocolError(PPAPIError):
     """The model's reply did not match the requested schema.
 
     Carries the full raw generation so a mismatch is diagnosable from the log
-    line alone.
+    line alone. Subclasses ``PPAPIError`` so that ``except PPAPIError`` catches
+    every way a call to this API can fail -- transport, HTTP status, and schema
+    alike -- while code that only cares about *this* adapter's parsing can still
+    name the narrower type.
     """
-
-
-class CallBudgetExceeded(RuntimeError):
-    """The run hit its API call ceiling and was stopped deliberately."""
-
-
-@dataclass
-class CallBudget:
-    """Shared spend guard and usage ledger for one multi-agent run.
-
-    Shared on purpose. Every agent gets its own *policy* (isolation), but they
-    all spend from one pot, so the budget object is passed to each policy the
-    factory builds. A 4-agent best-of-N is dozens of image requests against
-    someone else's credit; an unbounded retry loop is the failure mode worth
-    engineering against.
-
-    Every HTTP attempt counts, retries included -- a retried call is still a
-    billed call.
-    """
-
-    limit: int
-    calls: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    reasoning_tokens: int = 0
-    image_tokens: int = 0
-    total_tokens: int = 0
-    retries: int = 0
-    by_agent: dict[int, int] = field(default_factory=dict)
-
-    def reserve(self, agent_index: int | None = None) -> None:
-        if self.calls >= self.limit:
-            raise CallBudgetExceeded(
-                f"per-run API call budget exhausted: {self.calls}/{self.limit} calls "
-                f"already made ({self.total_tokens} tokens). Stopping rather than "
-                f"spending further. Raise QwenConfig.max_calls_per_run if this run "
-                f"legitimately needs more."
-            )
-        self.calls += 1
-        if agent_index is not None:
-            self.by_agent[agent_index] = self.by_agent.get(agent_index, 0) + 1
-
-    def record_usage(self, usage: dict[str, Any] | None) -> None:
-        if not isinstance(usage, dict):
-            return
-        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
-        self.completion_tokens += int(usage.get("completion_tokens") or 0)
-        self.total_tokens += int(usage.get("total_tokens") or 0)
-        details = usage.get("completion_tokens_details")
-        if isinstance(details, dict):
-            self.reasoning_tokens += int(details.get("reasoning_tokens") or 0)
-        prompt_details = usage.get("prompt_tokens_details")
-        if isinstance(prompt_details, dict):
-            self.image_tokens += int(prompt_details.get("image_tokens") or 0)
-
-    def as_dict(self) -> dict[str, Any]:
-        """Safe to serialize into run.json -- contains no credentials."""
-        return {
-            "calls": self.calls,
-            "limit": self.limit,
-            "retries": self.retries,
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "reasoning_tokens": self.reasoning_tokens,
-            "image_tokens": self.image_tokens,
-            "total_tokens": self.total_tokens,
-            "calls_by_agent": dict(sorted(self.by_agent.items())),
-        }
-
-
-def strip_code_fence(text: str) -> tuple[str, bool]:
-    """Remove a wrapping ```json ... ``` fence. Returns (text, was_fenced)."""
-    match = _FENCE_RE.match(text)
-    if match:
-        return match.group(1).strip(), True
-    return text.strip(), False
 
 
 def _require_point(value: Any, field_name: str, raw: str) -> tuple[float, float]:
@@ -409,16 +344,6 @@ def build_user_message(
     return "\n".join(lines)
 
 
-def _request_id(response: httpx.Response, body: dict[str, Any] | None) -> str:
-    """Whatever identifier the API gives us, for support requests."""
-    for header in ("x-request-id", "x-requestid", "request-id", "cf-ray"):
-        if header in response.headers:
-            return response.headers[header]
-    if isinstance(body, dict) and isinstance(body.get("id"), str):
-        return body["id"]
-    return "<none>"
-
-
 class QwenPolicy(AgentPolicy):
     """Drives a Qwen vision model over an OpenAI-compatible HTTP API.
 
@@ -439,121 +364,31 @@ class QwenPolicy(AgentPolicy):
     ) -> None:
         self.config = config
         self.run_config = run_config or RunConfig()
-        # A private budget when unshared, so a single-agent run is still capped.
-        self.budget = budget or CallBudget(limit=config.max_calls_per_run)
+        # The transport, the retry policy and the spend ledger all live on the
+        # shared client now. A private budget when unshared, so a single-agent
+        # run is still capped.
+        self.api = PPAPIClient(
+            config,
+            budget=budget or CallBudget(limit=config.max_calls_per_run),
+            agent_index=agent_index,
+            client=client,
+        )
         self.agent_index = agent_index
-        self._client = client
-        self._owns_client = client is None
         self._history: list[dict[str, Any]] = []
 
     # --- lifecycle ---------------------------------------------------------
 
-    def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.config.timeout_s)
-        return self._client
+    @property
+    def budget(self) -> CallBudget:
+        """The shared ledger. Kept as a property: callers reach for
+        ``policy.budget`` and should not have to know where it moved to."""
+        return self.api.budget
 
     async def reset(self) -> None:
         self._history = []
 
     async def close(self) -> None:
-        if self._client is not None and self._owns_client:
-            await self._client.aclose()
-            self._client = None
-
-    # --- HTTP --------------------------------------------------------------
-
-    def _headers(self) -> dict[str, str]:
-        # get_secret_value() is the only place the credential is unwrapped.
-        return {
-            "Authorization": f"Bearer {self.config.api_key.get_secret_value()}",
-            "Content-Type": "application/json",
-        }
-
-    @staticmethod
-    def _retry_after(response: httpx.Response) -> float | None:
-        raw = response.headers.get("retry-after")
-        if not raw:
-            return None
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            return None  # HTTP-date form; fall back to computed backoff
-
-    def _backoff(self, attempt: int) -> float:
-        """Exponential with jitter, capped. Jitter avoids a thundering herd
-        when several agents are throttled by the same 429."""
-        delay = min(
-            self.config.backoff_base_s * (2 ** (attempt - 1)),
-            self.config.backoff_cap_s,
-        )
-        return delay * (0.5 + random.random() / 2)
-
-    async def _post_chat(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST with retries. Never logs the key or the payload's image data."""
-        last_error: str = "no attempt was made"
-
-        for attempt in range(1, self.config.max_attempts + 1):
-            self.budget.reserve(self.agent_index)  # raises CallBudgetExceeded
-            if attempt > 1:
-                self.budget.retries += 1
-
-            try:
-                response = await self._get_client().post(
-                    self.config.chat_url, headers=self._headers(), json=payload
-                )
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                logger.warning(
-                    "attempt %d/%d: transport error: %s",
-                    attempt, self.config.max_attempts, last_error,
-                )
-                if attempt < self.config.max_attempts:
-                    await asyncio.sleep(self._backoff(attempt))
-                continue
-
-            if response.status_code == 429 or response.status_code >= 500:
-                wait = self._retry_after(response) or self._backoff(attempt)
-                last_error = (
-                    f"HTTP {response.status_code} "
-                    f"(request id {_request_id(response, None)}): {response.text[:300]}"
-                )
-                logger.warning(
-                    "attempt %d/%d: %s -- retrying in %.1fs",
-                    attempt, self.config.max_attempts, last_error, wait,
-                )
-                if attempt < self.config.max_attempts:
-                    await asyncio.sleep(wait)
-                continue
-
-            if response.status_code != 200:
-                # 4xx other than 429 means our request is wrong. Retrying would
-                # just spend money repeating the same mistake.
-                raise QwenProtocolError(
-                    f"HTTP {response.status_code} from the API "
-                    f"(request id {_request_id(response, None)}). "
-                    f"Not retried -- a 4xx means the request itself is wrong.\n"
-                    f"Body: {response.text[:800]}"
-                )
-
-            try:
-                body = response.json()
-            except ValueError as exc:
-                # A 200 carrying HTML is exactly what the host returns when /v1
-                # is missing from the URL, so this is a real failure mode.
-                raise QwenProtocolError(
-                    f"HTTP 200 but the body is not JSON ({exc}). This usually "
-                    f"means the URL is wrong: {self.config.chat_url} should end "
-                    f"in /v1/chat/completions.\nBody starts: {response.text[:200]}"
-                ) from exc
-
-            self.budget.record_usage(body.get("usage"))
-            return body
-
-        raise QwenProtocolError(
-            f"giving up after {self.config.max_attempts} attempts. "
-            f"Last error: {last_error}"
-        )
+        await self.api.close()
 
     # --- inference ---------------------------------------------------------
 
@@ -597,26 +432,8 @@ class QwenPolicy(AgentPolicy):
             "stream": False,
         }
 
-        body = await self._post_chat(payload)
-
-        try:
-            message = body["choices"][0]["message"]
-            raw = message.get("content") or ""
-        except (KeyError, IndexError, TypeError) as exc:
-            raise QwenProtocolError(
-                f"unexpected response shape ({exc}). "
-                f"Body: {json.dumps(body)[:600]}"
-            ) from exc
-
-        if not raw.strip():
-            # This model separates reasoning from content; an empty content with
-            # a full reasoning_content means it spent the budget thinking.
-            reasoning = (message.get("reasoning_content") or "")[:300]
-            raise QwenProtocolError(
-                "model returned empty content. This usually means max_tokens was "
-                "consumed by reasoning before any answer was emitted; raise "
-                f"QwenConfig.max_tokens.\nreasoning_content starts: {reasoning!r}"
-            )
+        body = await self.api.chat(payload)
+        raw = extract_message_text(body)
 
         logger.debug("raw generation: %s", raw)
         thought, action = parse_generation(raw, screenshot.size)
@@ -640,6 +457,10 @@ class QwenPolicy(AgentPolicy):
             self._history[-1]["error"] = error
 
 
+#: ``CallBudget``, ``CallBudgetExceeded`` and ``strip_code_fence`` now live in
+#: ``multi_agent_web.ppapi`` and are re-exported here: they were part of this
+#: module's interface before the transport was shared, and moving an import
+#: path is churn with no payoff.
 __all__ = [
     "CallBudget",
     "CallBudgetExceeded",

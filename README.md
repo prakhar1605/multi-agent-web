@@ -100,11 +100,16 @@ multi_agent_web/
 - Parallel orchestration: isolated contexts, two concurrency limits, per-step
   model-vs-browser timing, crash containment, best-of-N with a deterministic
   judge
+- Manager LLM and DAG decomposition: plan validation (cycles, dangling
+  dependencies and unstartable graphs are rejected, never repaired), wave
+  execution with results passed down dependency edges, budgeted replanning, and
+  DAG-growth/replan-rate reporting. Driven in tests by a stub client, so the
+  whole planning path is exercised with no API key and no spend.
+- LLM judge, filling the seam `judge/base.py` documented. Opt-in;
+  `MockJudge` stays the default.
 
 **Not built:**
 
-- Manager LLM and DAG decomposition of a goal into subtasks
-- LLM judge (the interface has a documented seam; `MockJudge` fills it)
 - Set-of-marks prompting — deliberately not built. The gate result says raw
   coordinate grounding is sufficient on this class of page, so SoM would be
   complexity without evidence.
@@ -127,7 +132,7 @@ python -m playwright install chromium
 ## Run
 
 ```bash
-pytest        # 43 pass; 1 skips unless a model endpoint is configured
+pytest        # 132 pass; 1 skips unless a model endpoint is configured
 
 # One agent, mock policy, bundled local page — zero network.
 python scripts/run_single.py --task "type a query on the demo page"
@@ -146,7 +151,23 @@ With a live model. Put `PPAPI_KEY` and `PPAPI_BASE_URL` in `.env` (gitignored):
 python scripts/smoke_api.py                       # verify the API contract
 python scripts/check_grounding.py --policy qwen   # run this FIRST
 python scripts/run_multi.py --task "..." --n 4 --policy qwen --max-calls 60
+
+# A manager LLM decomposes the task into a dependency graph and runs it in
+# waves, passing each subtask's finding down to the subtasks that depend on it.
+python scripts/run_multi.py --task "..." --strategy dag --policy qwen
+
+# The planning ablation: decompose, then never revise. Same code path.
+python scripts/run_multi.py --task "..." --strategy dag --policy qwen \
+    --planning-budget 0
+
+# An LLM judge instead of the deterministic one (best-of-N only).
+python scripts/run_multi.py --task "..." --n 4 --policy qwen --judge llm
 ```
+
+`--strategy dag` needs a key even with `--policy mock`, because the manager is
+an LLM whatever the agents are — which makes `--policy mock --strategy dag` a
+cheap way to inspect a decomposition (one or two calls) without paying for the
+browsing.
 
 `--max-calls` is a per-run ceiling shared across agents; the run aborts rather
 than overspending, and actual usage is written to `run.json`. The grounding gate
@@ -164,7 +185,8 @@ python scripts/check_grounding.py --policy molmoweb
 Output goes to `runs/<timestamp>/agent_0/`, `agent_1/`, … each with a screenshot
 per step and a `steps.jsonl`, plus a top-level `run.json`
 ([format](docs/run_json.md)) holding per-agent outcomes, the judge's decision
-and the timing breakdown.
+and the timing breakdown. A `dag` run adds the initial and final graphs, every
+replan with its reason, and the planning budget consumed.
 
 ## Design decisions
 
@@ -237,12 +259,16 @@ against.
 1. **Harder grounding pages.** 6/6 on a clean synthetic layout is a floor, not a
    ceiling. Real sites have dense nav bars, overlapping z-indexes and ambiguous
    labels. Set-of-marks stays unbuilt until a page defeats raw coordinates.
-2. **Manager LLM + DAG decomposition** — decompose a goal into subtasks with
-   dependencies and schedule them in waves. Slots in as another `Strategy`; the
-   interface and `run.json` were shaped to accept it without changes.
-3. **LLM judge**, replacing `MockJudge` at the documented seam.
-4. **Scaling study** — model-vs-browser time as N grows, now that there is a
+2. **Scaling study** — model-vs-browser time as N grows, now that there is a
    real 18:1 measurement to extrapolate from.
+3. **Planning ablation** — `--planning-budget 0` against the default 10 on the
+   same tasks. The budget is a config value precisely so the two runs differ in
+   nothing else; `growth.replan_rate` and `growth.net_growth` in `run.json` are
+   the numbers to compare.
+4. **A stronger manager.** `--manager-model` is the knob MACU found mattered
+   most, and it is one flag: the manager is a single model with two hooks and no
+   other responsibilities, so swapping it changes planning quality and nothing
+   else.
 5. **UI** for replaying trajectories from `run.json` side by side.
 
 ## Credits

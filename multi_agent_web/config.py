@@ -193,3 +193,86 @@ class QwenConfig(BaseModel):
     @property
     def chat_url(self) -> str:
         return f"{self.base_url}/v1/chat/completions"
+
+
+class ManagerConfig(BaseModel):
+    """The Phase 3 manager LLM: which model plans, and how much it may replan.
+
+    Connection settings are NOT here. The manager talks to the same PP API as
+    the policy through the same client, so it inherits the key, base URL,
+    retries and shared call budget from ``QwenConfig`` -- what is manager-
+    specific is the model and the planning budget, and those are the two knobs
+    worth having in one obvious place.
+
+    ``model`` defaults to empty, meaning "whatever the policy is using". MACU
+    found the manager's strength to be the single setting that mattered most,
+    so this is written to be changed: point it at a stronger model and nothing
+    else about the run moves.
+
+    ``planning_budget`` is in DAG *edits*, not API calls, and 10 is the paper's
+    default. Setting it to 0 is a supported configuration, not a broken one:
+    the initial decomposition still runs and replanning is skipped entirely,
+    which is the ablation, expressed as a config value rather than a code path.
+    """
+
+    model: str = Field(
+        default="", description="Empty means: the same model the policy uses."
+    )
+    planning_budget: int = Field(
+        default=10, ge=0, description="DAG edits allowed across the whole run."
+    )
+    max_subtasks: int = Field(
+        default=6,
+        gt=0,
+        description="Ceiling on the initial decomposition. Every subtask is a "
+        "whole browser and a whole model budget.",
+    )
+    #: Waves, not steps. Bounds a pathological plan-grow-plan loop; the edit
+    #: budget already bounds growth, so this is a backstop, not the main limit.
+    max_waves: int = Field(default=8, gt=0)
+
+    # Planning is not creative work: near-greedy decoding gives more consistent
+    # graphs than the 0.7 the browsing policy runs at.
+    temperature: float = Field(default=0.2, ge=0)
+    max_tokens: int = Field(default=2048, gt=0)
+
+    @classmethod
+    def from_env(cls, **overrides) -> "ManagerConfig":
+        """Build from ``PPAPI_MANAGER_MODEL`` / ``MANAGER_PLANNING_BUDGET``.
+
+        Always returns a config: unlike the connection settings, every value
+        here has a usable default, so a missing environment means "the
+        defaults", not "cannot run".
+        """
+        load_env_file()
+        if "model" not in overrides:
+            overrides["model"] = os.environ.get("PPAPI_MANAGER_MODEL", "").strip()
+        if "planning_budget" not in overrides:
+            raw = os.environ.get("MANAGER_PLANNING_BUDGET", "").strip()
+            if raw:
+                overrides["planning_budget"] = int(raw)
+        return cls(**overrides)
+
+
+class JudgeConfig(BaseModel):
+    """The Phase 3 LLM judge. Opt-in; ``MockJudge`` stays the default.
+
+    Same arrangement as ``ManagerConfig``: connection comes from the shared
+    client, this holds only what is judge-specific. Temperature is 0 because a
+    judge that picks a different winner from the same trajectories is not a
+    judge -- reproducibility is the property that makes its verdicts worth
+    comparing across runs.
+    """
+
+    model: str = Field(
+        default="", description="Empty means: the same model the policy uses."
+    )
+    temperature: float = Field(default=0.0, ge=0)
+    max_tokens: int = Field(default=512, gt=0)
+
+    @classmethod
+    def from_env(cls, **overrides) -> "JudgeConfig":
+        load_env_file()
+        if "model" not in overrides:
+            overrides["model"] = os.environ.get("PPAPI_JUDGE_MODEL", "").strip()
+        return cls(**overrides)

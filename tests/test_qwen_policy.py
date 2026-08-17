@@ -268,7 +268,24 @@ class TestCallBudget:
         assert set(payload) == {
             "calls", "limit", "retries", "prompt_tokens", "completion_tokens",
             "reasoning_tokens", "image_tokens", "total_tokens", "calls_by_agent",
+            "non_agent_calls",
         }
+
+    def test_calls_without_an_agent_index_are_attributed_separately(self) -> None:
+        """The Phase 3 manager and judge spend from the same pot as the agents.
+
+        They have no agent index, so they must still show up in the total while
+        staying out of the per-agent breakdown -- otherwise "what did the
+        manager cost?" is unanswerable from run.json.
+        """
+        budget = CallBudget(limit=10)
+        budget.reserve(0)
+        budget.reserve(1)
+        budget.reserve(None)  # manager
+        budget.reserve(None)  # judge
+        assert budget.calls == 4
+        assert budget.by_agent == {0: 1, 1: 1}
+        assert budget.non_agent_calls == 2
 
 
 class TestCredentialSafety:
