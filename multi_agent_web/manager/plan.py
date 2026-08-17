@@ -29,8 +29,15 @@ Replanning returns a :class:`Replan` -- a set of additions and removals -- and
 never a replacement graph. Two reasons. The planning budget is denominated in
 edits, so edits have to be countable. And a manager handed the licence to
 re-emit the whole graph will re-emit the whole graph, including the parts that
-have already run; ``apply`` refuses to remove a subtask that is not still
-pending, so completed work cannot be rewritten out of the record.
+have already run; ``apply`` refuses to remove a subtask that has run or is
+running, so the record of executed work cannot be rewritten.
+
+A removal is allowed only for a subtask that never executed -- ``pending`` (not
+started) or ``blocked`` (an upstream dependency failed, so it never will). That
+distinction is the whole point of re-routing: when a failed lookup blocks a
+join, the manager's fix is exactly to remove the blocked join and add one over
+the inputs that did arrive. Refusing to remove a ``blocked`` node would forbid
+the one edit the block was supposed to prompt.
 """
 
 from __future__ import annotations
@@ -49,6 +56,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 SubtaskStatus = Literal["pending", "running", "done", "failed", "blocked"]
 
 TERMINAL_STATUSES = ("done", "failed", "blocked")
+
+#: Statuses a replan may prune. A subtask in either never executed: ``pending``
+#: has not started, and ``blocked`` never will (an upstream dependency failed),
+#: so removing it rewrites nothing that ran. ``running``/``done``/``failed`` are
+#: refused -- those are in flight or already happened, and a replan must not
+#: edit the record of work that occurred.
+REMOVABLE_STATUSES = ("pending", "blocked")
 
 
 class InvalidPlan(Exception):
@@ -332,12 +346,13 @@ class DAG(BaseModel):
                 f"cannot remove {unknown}: no such subtask. Known ids: "
                 f"{sorted(current)}."
             )
-        started = [i for i in replan.remove if current[i].status != "pending"]
-        if started:
+        ran = [i for i in replan.remove if current[i].status not in REMOVABLE_STATUSES]
+        if ran:
+            statuses = ", ".join(sorted({current[i].status for i in ran}))
             raise InvalidPlan(
-                f"cannot remove {started}: already {', '.join(sorted({current[i].status for i in started}))}. "
-                f"A replan may prune work that has not started; it may not "
-                f"rewrite what already ran."
+                f"cannot remove {ran}: {statuses}. A replan may prune work that "
+                f"never executed (pending, or blocked by an upstream failure); it "
+                f"may not rewrite work that is running, done or failed."
             )
 
         clashes = [s.id for s in replan.add if s.id in current and s.id not in replan.remove]

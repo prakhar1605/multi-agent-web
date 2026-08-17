@@ -283,12 +283,30 @@ class TestGraphEdits:
                 )
             )
 
-    def test_completed_work_cannot_be_removed(self) -> None:
+    @pytest.mark.parametrize("status", ["running", "done", "failed"])
+    def test_executed_work_cannot_be_removed(self, status: str) -> None:
+        """A replan must not rewrite work that ran or is running."""
         dag = dag_of(("a", []), ("b", ["a"]))
-        dag.get("a").status = "done"
-        dag.get("a").answer = "found it"
-        with pytest.raises(InvalidPlan, match="already done"):
+        dag.get("a").status = status
+        with pytest.raises(InvalidPlan) as exc:
             dag.apply(Replan(remove=["a"]))
+        assert status in str(exc.value)
+        assert "running, done or failed" in str(exc.value)
+
+    @pytest.mark.parametrize("status", ["pending", "blocked"])
+    def test_work_that_never_ran_can_be_removed(self, status: str) -> None:
+        """pending never started; blocked never will. Both are prunable.
+
+        The ``blocked`` case is the regression: refusing it forbids the exact
+        re-route a block is meant to prompt.
+        """
+        dag = dag_of(("a", []), ("gone", ["a"]))
+        dag.get("gone").status = status
+        if status == "blocked":
+            dag.get("gone").error = "blocked: depends on a, which did not complete"
+        edited = dag.apply(Replan(remove=["gone"]))
+        assert edited.get("gone") is None
+        assert [s.id for s in edited.subtasks] == ["a"]
 
     def test_surviving_subtasks_keep_their_results(self) -> None:
         dag = dag_of(("a", []), ("b", []))
@@ -589,6 +607,60 @@ async def test_a_subtask_failure_does_not_sink_the_run(tmp_path: Path) -> None:
     # And the failure is visible rather than swallowed.
     assert any(s.status != "done" for s in result.sessions)
     assert result.details["final_dag"]["counts"]["failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_manager_reroutes_around_a_blocked_join(tmp_path: Path) -> None:
+    """The pricecheck scenario, end to end: a failed lookup blocks the join,
+    the manager removes the blocked join and adds one over the inputs that did
+    arrive, and the edit is APPLIED.
+
+    This is the exact edit the old guard refused ("cannot remove: already
+    blocked"), which cost a live run its comparison. Here the run must end with
+    the re-routed join done and reporting.
+    """
+    manager = manager_with(
+        [
+            plan_reply(
+                ("price_a", []), ("price_b", []), ("price_c", []),
+                ("price_missing", []),
+                ("compare_all", ["price_a", "price_b", "price_c", "price_missing"]),
+            ),
+            replan_reply(
+                add=[("compare_found", ["price_a", "price_b", "price_c"])],
+                remove=["compare_all"],
+                reason="price_missing failed; compare the three prices that were found",
+            ),
+            NO_CHANGE,
+            NO_CHANGE,
+        ],
+        planning_budget=10,
+    )
+
+    result = await orchestrate(
+        task="compare four book prices, one of which does not exist",
+        strategy=DagStrategy(manager),
+        policy_factory=lambda i: RecordingPolicy(i, [], crash_on="price_missing"),
+        run_config=run_config(tmp_path),
+    )
+
+    final = {s["id"]: s["status"] for s in result.details["final_dag"]["subtasks"]}
+    # The blocked join is gone; the re-routed one ran to completion.
+    assert "compare_all" not in final, "the blocked join was not removed"
+    assert final["compare_found"] == "done"
+    assert final["price_missing"] == "failed"
+    assert [final[k] for k in ("price_a", "price_b", "price_c")] == ["done"] * 3
+
+    # The re-route was APPLIED, not refused, and charged (1 add + 1 remove).
+    applied = [r for r in result.details["replans"] if r.get("applied")]
+    assert len(applied) == 1
+    assert applied[0]["remove"] == ["compare_all"]
+    assert [s["id"] for s in applied[0]["add"]] == ["compare_found"]
+    assert result.details["budget"]["spent"] == 2
+
+    # And the run's answer comes from the re-routed join, not three loose prices.
+    assert result.answer == "did compare_found"
+    assert result.contributing_indices  # the join's agent is credited
 
 
 @pytest.mark.asyncio
