@@ -64,6 +64,28 @@ def test_index_is_served(runs_dir: Path) -> None:
         assert "id=\"dag\"" in r.text  # the DAG panel is in the page
 
 
+def test_the_legend_explains_every_mark_the_graph_draws(runs_dir: Path) -> None:
+    """The panel has to be readable in a screen recording, where nobody can
+    hover for a tooltip. Anything the graph draws that is not obvious must be
+    named in the legend on the page itself.
+    """
+    with TestClient(create_app(runs_dir)) as client:
+        page = client.get("/").text
+    for mark in (
+        # status, as before
+        "pending", "running", "done", "failed", "blocked (upstream failed)",
+        # where a node came from
+        "in the manager's first decomposition",
+        "added mid-run to redo an earlier attempt",
+        "added mid-run as new work",
+        # the two kinds of line, which are easy to confuse
+        "depends on", "retry of",
+        # and the collapsed attempt chain, which is a control as well as a mark
+        "several attempts",
+    ):
+        assert mark in page, f"the legend does not explain {mark!r}"
+
+
 def test_presets_include_the_dag_one(runs_dir: Path) -> None:
     with TestClient(create_app(runs_dir)) as client:
         presets = client.get("/api/presets").json()

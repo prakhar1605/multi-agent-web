@@ -130,6 +130,43 @@
   #dag .colhead.now { fill: var(--running); }
   @keyframes pulse { 50% { opacity: .62; } }
 
+  /* --- lineage: attempts of one logical subtask ------------------------- */
+  /* Origin badge. RETRY and NEW are filled so they read on any node colour;
+     PLAN is deliberately quiet -- most nodes are from the initial plan, and a
+     badge that shouts on every node tells you nothing. */
+  #dag .node .badge text { font-size: 10px; font-weight: 800; letter-spacing: .5px; }
+  #dag .node .badge.plan rect { fill: rgba(0,0,0,.20); }
+  #dag .node .badge.plan text { fill: #0b1220; opacity: .72; }
+  #dag .node.pending .badge.plan rect, #dag .node.blocked .badge.plan rect { fill: rgba(255,255,255,.10); }
+  #dag .node.pending .badge.plan text, #dag .node.blocked .badge.plan text { fill: #cbd5e1; opacity: .85; }
+  #dag .node .badge.retry rect { fill: #5b21b6; }
+  #dag .node .badge.retry text { fill: #ede9fe; }
+  #dag .node .badge.new rect { fill: #1e40af; }
+  #dag .node .badge.new text { fill: #dbeafe; }
+
+  /* Lineage edge: dotted violet, never the same shape as a dependency edge.
+     Dependency edges are solid (or long-dashed when the dependency failed);
+     this is a fine dot, in a colour no dependency edge ever takes. */
+  #dag .edge.lineage { stroke: #c4b5fd; stroke-width: 2.5; stroke-dasharray: 1.5 5.5; stroke-linecap: round; }
+  #dag .retrylbl { fill: #c4b5fd; font-size: 10.5px; font-weight: 800; letter-spacing: .7px; text-transform: uppercase; }
+
+  /* The band that gathers an expanded chain into one lane. */
+  #dag .lineage-band rect.band { fill: rgba(167,139,250,.09); stroke: #6d5bd0; stroke-width: 1.5;
+    stroke-dasharray: 5 4; }
+  #dag .lineage-band text.band-label { fill: #c4b5fd; font-size: 11.5px; font-weight: 700; letter-spacing: .3px; }
+  #dag .lineage-band text.band-label tspan.outcome { font-weight: 800; }
+
+  /* Expander / collapser. Cursor and hover make it read as a control, not a label. */
+  #dag .toggle { cursor: pointer; }
+  #dag .toggle rect { fill: rgba(0,0,0,.30); stroke: rgba(255,255,255,.25); stroke-width: 1; }
+  #dag .toggle text { font-size: 11px; font-weight: 800; fill: #ede9fe; letter-spacing: .3px; }
+  #dag .toggle:hover rect { fill: #5b21b6; stroke: #c4b5fd; }
+  #dag .lineage-band .toggle rect { fill: rgba(91,33,182,.55); stroke: #6d5bd0; }
+  /* Darker than the plain toggle: the attempt dots sit on it, and a red dot
+     on a red node needs the backing to actually be dark. */
+  #dag .toggle.attempts rect { fill: rgba(0,0,0,.55); }
+  #dag .attempt-dot { stroke: rgba(0,0,0,.35); stroke-width: 1; }
+
   .replans { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
   .replans .lbl { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; font-weight: 700; margin-right: 2px; }
   .rp { border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 999px; padding: 3px 11px;
@@ -138,8 +175,25 @@
   .rp.on { border-color: var(--accent); background: var(--panel-2); }
   .rp.applied { color: var(--done); } .rp.refused { color: var(--failed); text-decoration: line-through; }
   .rp.skipped { color: var(--muted); } .rp.future { opacity: .4; }
-  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 9px; color: var(--faint); font-size: 11.5px; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 9px; color: var(--faint); font-size: 11.5px;
+    align-items: center; }
+  .legend + .legend { margin-top: 5px; }
   .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
+  .legend .lg-h { color: var(--faint); font-size: 10px; font-weight: 800; letter-spacing: .8px; text-transform: uppercase;
+    opacity: .75; min-width: 44px; }
+  .legend b { font-weight: 800; }
+  .lg-badge { display: inline-block; padding: 1px 5px; border-radius: 4px; font-size: 9.5px; letter-spacing: .5px;
+    margin-right: 5px; vertical-align: 1px; }
+  .lg-badge.plan { background: rgba(255,255,255,.10); color: #cbd5e1; }
+  .lg-badge.retry { background: #5b21b6; color: #ede9fe; }
+  .lg-badge.new { background: #1e40af; color: #dbeafe; }
+  .lg-chip { display: inline-block; padding: 1px 6px; border-radius: 5px; background: rgba(0,0,0,.3);
+    border: 1px solid rgba(255,255,255,.25); color: #ede9fe; font-size: 10px; margin: 0 2px; }
+  .lg-line { width: 24px !important; height: 0 !important; border-radius: 0 !important; vertical-align: 3px !important; }
+  .lg-line.dep { border-top: 2.5px solid #4c5b7c; }
+  .lg-line.lin { border-top: 2.5px dotted #c4b5fd; }
+  .lg-band { width: 24px !important; height: 11px; border-radius: 4px !important;
+    background: rgba(167,139,250,.09); border: 1.5px dashed #6d5bd0; }
 
   /* judge */
   #judgepanel .verdict { font-size: 16px; margin-bottom: 4px; }
@@ -260,12 +314,26 @@
     <div class="caption-full" id="dag-caption-full" data-exp="dagreason" hidden></div>
     <div id="dagwrap"><svg id="dag" xmlns="http://www.w3.org/2000/svg"></svg></div>
     <div class="replans" id="replans"></div>
+    <!-- Two rows, because they answer two different questions: what happened
+         to a subtask, and where the subtask came from. Everything the graph
+         draws is named here -- the panel has to read in a screen recording,
+         where nobody can hover. -->
     <div class="legend">
+      <span class="lg-h">status</span>
       <span><i style="background:#2b3752"></i>pending</span>
       <span><i style="background:var(--running)"></i>running</span>
       <span><i style="background:var(--done)"></i>done</span>
       <span><i style="background:var(--failed)"></i>failed</span>
       <span><i style="background:repeating-linear-gradient(135deg,#a78bfa 0 3px,#2b3752 3px 7px)"></i>blocked (upstream failed)</span>
+    </div>
+    <div class="legend">
+      <span class="lg-h">origin</span>
+      <span><b class="lg-badge plan">PLAN</b>in the manager's first decomposition</span>
+      <span><b class="lg-badge retry">RETRY</b>added mid-run to redo an earlier attempt</span>
+      <span><b class="lg-badge new">NEW</b>added mid-run as new work</span>
+      <span><i class="lg-line dep"></i>depends on (arrow: waits for)</span>
+      <span><i class="lg-line lin"></i>retry of (lineage, waits for nothing)</span>
+      <span><i class="lg-band"></i>one subtask, several attempts — click <b class="lg-chip">▸ N attempts</b> to expand</span>
     </div>
   </section>
 
@@ -347,11 +415,18 @@ const view = {
   runId: null, events: [], idx: -1, live: false, follow: true, ws: null,
   playing: false, playT: 0, speed: 1, raf: 0, lastTick: 0,
   cards: new Map(), presets: [], hl: null, dagSig: '', open: new Set(),
+  // Attempt chains the user has expanded, keyed by the chain's first
+  // subtask id. Lives on the view, not the run state, so scrubbing the
+  // timeline does not fold a chain the user just opened.
+  expanded: new Set(),
 };
 
 function newState() {
   return { run: null, agents: {}, order: [], dag: null, manager: null, budget: null, replans: [], waves: [],
-           wavesDone: 0, currentWave: 0, judge: null, finished: null, failed: null, planning: null, last: null };
+           wavesDone: 0, currentWave: 0, judge: null, finished: null, failed: null, planning: null, last: null,
+           // Ids the manager decomposed the task into, so a node added later
+           // can be told from one that was there from the start.
+           initialIds: new Set() };
 }
 
 function apply(s, ev) {
@@ -360,6 +435,7 @@ function apply(s, ev) {
   switch (ev.type) {
     case 'run_started': s.run = { task: d.task, strategy: d.strategy, t: ev.t }; if (d.strategy === 'dag') s.planning = 'decomposing'; break;
     case 'plan_created': s.dag = d.dag; s.manager = d.manager || null; s.budget = (d.manager || {}).budget || null;
+      s.initialIds = new Set((d.dag?.subtasks || []).map(x => x.id));
       s.planning = null; s.replans.push({ kind: 'initial', t: ev.t, wave: 0 }); break;
     case 'wave_started': s.dag = d.dag; s.waves.push({ wave: d.wave, subtasks: d.subtasks || [], t: ev.t }); s.currentWave = d.wave; s.planning = null; break;
     case 'agent_started': s.agents[d.index] = { index: d.index, label: d.label, task: d.task, steps: [], status: 'running', t: ev.t };
@@ -434,7 +510,7 @@ async function loadRunList() {
 // ---------------------------------------------------------------------------
 async function openRun(id) {
   stopPlay(); closeWs();
-  view.runId = id; view.events = []; view.idx = -1; view.follow = true; view.cards.clear(); view.dagSig = ''; view.open.clear();
+  view.runId = id; view.events = []; view.idx = -1; view.follow = true; view.cards.clear(); view.dagSig = ''; view.open.clear(); view.expanded.clear();
   $('#agents').innerHTML = ''; $('#hdr-run').textContent = id;
   history.replaceState(null, '', '#' + encodeURIComponent(id));
   document.querySelectorAll('.run').forEach(el => el.classList.toggle('on', el.dataset.id === id));
@@ -563,7 +639,64 @@ function renderSummary(s) {
 }
 
 // --- DAG: the star --------------------------------------------------------
-const NW = 264, NH = 122, GAPX = 70, GAPY = 24, PADX = 18, PADY = 16, HEADH = 26;
+const NW = 264, NH = 122, GAPX = 70, GAPY = 38, PADX = 18, PADY = 16, HEADH = 26;
+// How far a lineage band bleeds past the attempts it gathers. The top is wider
+// because the band's label sits inside it.
+const BAND_TOP = 23, BAND_BOT = 9, BAND_SIDE = 10;
+
+// --- lineage: attempts of one logical subtask -----------------------------
+// Built ONLY from the manager's declared `retry_of`. Nothing is inferred from
+// id similarity: `find_x_retry` and `find_x_direct` are two attempts at the
+// same lookup while `price_a` / `price_b` are unrelated, and no naming rule
+// separates those two cases. A run whose manager declared nothing therefore
+// yields one group per subtask, which is exactly the old one-node-per-row view.
+function lineageGroups(subs) {
+  const byId = Object.fromEntries(subs.map(x => [x.id, x]));
+  // A retry_of pointing at something no longer in the graph just ends the
+  // chain -- the node still shows as a retry, it simply has nothing to link to.
+  const parentOf = id => {
+    const p = byId[id] && byId[id].retry_of;
+    return p && byId[p] && p !== id ? p : null;
+  };
+  const root = {}, depth = {};
+  const walk = id => {
+    if (root[id] !== undefined) return;
+    const chain = [];
+    let cur = id, guard = 0;
+    while (cur && root[cur] === undefined && guard++ < 500) { chain.push(cur); cur = parentOf(cur); }
+    const anchored = cur && root[cur] !== undefined;
+    const base = anchored ? root[cur] : chain[chain.length - 1];
+    let d = anchored ? depth[cur] + 1 : 0;
+    for (let k = chain.length - 1; k >= 0; k--) { root[chain[k]] = base; depth[chain[k]] = d++; }
+  };
+  const groups = [], byRoot = new Map();
+  subs.forEach((st, i) => {
+    walk(st.id);
+    const r = root[st.id];
+    if (!byRoot.has(r)) { const g = { key: r, ids: [], order: i }; byRoot.set(r, g); groups.push(g); }
+    byRoot.get(r).ids.push(st.id);
+  });
+  for (const g of groups) {
+    // Chain order: the original first, then each attempt that superseded it.
+    g.ids.sort((a, b) => depth[a] - depth[b] || (byId[a].wave || 99) - (byId[b].wave || 99) || a.localeCompare(b));
+    g.attempts = g.ids.length;
+    g.last = byId[g.ids[g.ids.length - 1]];
+  }
+  return groups;
+}
+
+// Where a node came from: the first decomposition, a mid-run retry, or mid-run
+// new work. `initialIds` is empty for a stream with no plan_created, in which
+// case everything reads as PLAN -- the honest answer when we were not told.
+function originOf(st, s) {
+  if (st.retry_of) return 'retry';
+  if (!s.initialIds || !s.initialIds.size) return 'plan';
+  return s.initialIds.has(st.id) ? 'plan' : 'new';
+}
+const ORIGIN_TEXT = { plan: 'PLAN', retry: 'RETRY', new: 'NEW' };
+const STATUS_FILL = { done: 'var(--done)', failed: 'var(--failed)', running: 'var(--running)',
+                      blocked: '#a78bfa', pending: '#64748b' };
+
 function renderDag(s) {
   const panel = $('#dagpanel');
   const isDag = s.run && s.run.strategy === 'dag';
@@ -589,54 +722,136 @@ function renderDag(s) {
     for (const d of st.depends_on || []) { const dc = col[d] || (byId[d]?.wave) || (s.wavesDone + 1); c = Math.max(c, dc + 1); }
     col[st.id] = c;
   }
-  const maxCol = Math.max(1, ...Object.values(col));
-  const rows = {}; const pos = {};
-  for (const st of subs) { const c = col[st.id]; rows[c] = rows[c] || []; rows[c].push(st.id); }
-  const maxRows = Math.max(1, ...Object.values(rows).map(r => r.length));
-  const W = PADX * 2 + maxCol * NW + (maxCol - 1) * GAPX, H = PADY * 2 + HEADH + maxRows * NH + (maxRows - 1) * GAPY;
-  for (const c of Object.keys(rows)) {
-    const list = rows[c], off = (maxRows - list.length) * (NH + GAPY) / 2;
-    list.forEach((id, r) => { pos[id] = { x: PADX + (c - 1) * (NW + GAPX), y: PADY + HEADH + off + r * (NH + GAPY) }; });
+
+  const groups = lineageGroups(subs);
+  const isOpen = g => view.expanded.has(g.key);
+  const collapsedGroup = g => g.attempts > 1 && !isOpen(g);
+
+  // A cell is what gets drawn: a whole collapsed chain, or one subtask.
+  const cells = [];
+  for (const g of groups) {
+    if (collapsedGroup(g)) cells.push({ group: g, ids: g.ids.slice(), collapsed: true });
+    else for (const id of g.ids) cells.push({ group: g, ids: [id], collapsed: false });
   }
-  const sig = JSON.stringify([subs.map(x => [x.id, x.status, x.wave, x.agent_index, trunc(x.answer || x.error || '', 40)]), s.wavesDone, s.currentWave, view.hl]);
+  const cellOf = {};
+  for (const c of cells) for (const id of c.ids) cellOf[id] = c;
+
+  // Collapsing a chain merges columns, which can pull a cell left of something
+  // it depends on. Relax right until every dependency sits in an earlier
+  // column. Bounded, so a graph that cannot satisfy that stops rather than spins.
+  for (const c of cells) c.col = Math.min(...c.ids.map(id => col[id]));
+  for (let pass = 0; pass <= cells.length; pass++) {
+    let moved = false;
+    for (const c of cells) {
+      let want = c.col;
+      for (const id of c.ids) for (const d of byId[id].depends_on || []) {
+        const dc = cellOf[d];
+        if (dc && dc !== c) want = Math.max(want, dc.col + 1);
+      }
+      if (want > c.col) { c.col = want; moved = true; }
+    }
+    if (!moved) break;
+  }
+
+  const spans = new Map();
+  for (const c of cells) {
+    let sp = spans.get(c.group.key);
+    if (!sp) spans.set(c.group.key, sp = { g: c.group, min: c.col, max: c.col, cells: [] });
+    sp.min = Math.min(sp.min, c.col); sp.max = Math.max(sp.max, c.col); sp.cells.push(c);
+  }
+  const ordered = [...spans.values()].sort((a, b) => a.min - b.min || a.g.order - b.g.order);
+  for (const sp of ordered) sp.banded = sp.g.attempts > 1 && isOpen(sp.g);
+  const bands = ordered.filter(sp => sp.banded);
+
+  // Two layout regions, because they answer to different constraints.
+  //
+  // Everything that is one box -- a plain subtask, or a collapsed chain -- is
+  // laid out per column and centred, which is the layout this panel has always
+  // had and the one that stays compact as waves accumulate.
+  //
+  // An EXPANDED chain instead needs its attempts on one line across several
+  // columns, and a row shared with anything else would read as a chain that
+  // isn't one: an edge leaving the node to its left enters it at exactly the
+  // same height. So an open chain gets a dedicated lane under the rest, where
+  // its band can span the gaps without another subtask sitting inside it.
+  const maxCol = Math.max(1, ...cells.map(c => c.col));
+  const W = PADX * 2 + maxCol * NW + (maxCol - 1) * GAPX;
+  const X = c => PADX + (c - 1) * (NW + GAPX);
+  const top = cells.filter(c => !(c.group.attempts > 1 && isOpen(c.group)));
+  const rows = {};
+  for (const c of top) (rows[c.col] = rows[c.col] || []).push(c);
+  const maxRows = top.length ? Math.max(...Object.values(rows).map(r => r.length)) : 0;
+  for (const key of Object.keys(rows)) {
+    const list = rows[key], off = (maxRows - list.length) * (NH + GAPY) / 2;
+    list.forEach((c, r) => { c.x = X(+key); c.y = PADY + HEADH + off + r * (NH + GAPY); });
+  }
+  let cursor = PADY + HEADH + maxRows * (NH + GAPY);
+  for (const sp of bands) {
+    const y = cursor + BAND_TOP;
+    for (const c of sp.cells) { c.x = X(c.col); c.y = y; }
+    sp.y = y;
+    cursor = y + NH + BAND_BOT + GAPY;
+  }
+  const H = cursor - GAPY + PADY;
+
+  const sig = JSON.stringify([
+    subs.map(x => [x.id, x.status, x.wave, x.agent_index, x.retry_of, trunc(x.answer || x.error || '', 40)]),
+    s.wavesDone, s.currentWave, view.hl, [...view.expanded].sort(), [...(s.initialIds || [])].sort(),
+  ]);
   if (sig === view.dagSig && +svg.getAttribute('width') === W) return;
   view.dagSig = sig;
+
   let out = `<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)"><rect width="8" height="8" fill="#2b3752"/><rect width="3" height="8" fill="#6d5bd0"/></pattern>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4c5b7c"/></marker></defs>`;
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4c5b7c"/></marker>
+    <marker id="retryarrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#c4b5fd"/></marker></defs>`;
+
   for (let c = 1; c <= maxCol; c++) {
-    const x = PADX + (c - 1) * (NW + GAPX);
+    const x = X(c);
     const now = c === s.currentWave && s.wavesDone < s.currentWave;
     const label = c <= s.wavesDone ? `wave ${c}` : now ? `wave ${c} · running` : `wave ${c} · planned`;
     out += `<text class="colhead ${now ? 'now' : ''}" x="${x}" y="${PADY + 12}">${label}</text>`;
   }
-  for (const st of subs) for (const d of st.depends_on || []) {
-    const a = pos[d], b = pos[st.id]; if (!a || !b) continue;
-    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
-    const dep = byId[d]; const bad = dep && (dep.status === 'failed' || dep.status === 'blocked');
-    out += `<path class="edge" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" stroke="${bad ? 'var(--failed)' : dep && dep.status === 'done' ? 'var(--done)' : '#4c5b7c'}" ${bad ? 'stroke-dasharray="6 5"' : ''} marker-end="url(#arrow)"/>`;
-  }
-  for (const st of subs) {
-    const p = pos[st.id], status = st.status || 'pending';
-    const agent = st.agent_index != null ? st.agent_index : agentForSubtask(s, st.id);
-    let sub = '';
-    if (status === 'pending') sub = (st.depends_on || []).length ? `waits for ${trunc((st.depends_on || []).join(', '), 30)}` : 'ready to start';
-    else if (status === 'blocked') sub = `upstream failed: ${trunc((st.depends_on || []).filter(d => ['failed', 'blocked'].includes(byId[d]?.status)).join(', '), 24)}`;
-    else if (status === 'running') sub = agent != null ? `agent ${agent} is on it` : 'starting…';
-    else sub = agent != null ? `agent ${agent}` : '';
-    const third = status === 'done' ? '→ ' + trunc(oneLine(st.answer || ''), 32) : status === 'failed' ? '!! ' + trunc(oneLine(st.error || ''), 32) : status === 'blocked' ? 'never ran' : trunc(oneLine(st.instruction || ''), 34);
-    const pillW = 10 + status.length * 7.4;
-    const waveTag = st.wave ? `wave ${st.wave}` : (status === 'pending' ? `wave ${col[st.id]}?` : '');
-    out += `<g class="node ${status} ${view.hl === st.id ? 'hl' : ''}" data-id="${esc(st.id)}" transform="translate(${p.x},${p.y})">
-      <title>${esc(st.id)}\n${esc(st.instruction || '')}${st.answer ? '\n→ ' + esc(st.answer) : ''}${st.error ? '\n!! ' + esc(st.error) : ''}</title>
-      <rect class="body" width="${NW}" height="${NH}" rx="14"/>
-      <rect class="pillbg" x="12" y="12" width="${pillW}" height="18" rx="5"/>
-      <text class="pill" x="${12 + pillW / 2}" y="25" text-anchor="middle">${status.toUpperCase()}</text>
-      <text x="${NW - 12}" y="25" text-anchor="end" font-size="11.5" opacity=".75">${esc(waveTag)}</text>
-      <text x="12" y="56" font-size="17" font-weight="700">${esc(trunc(st.id, 26))}</text>
-      <text x="12" y="80" font-size="12.5" opacity=".85">${esc(sub)}</text>
-      <text x="12" y="104" font-size="12" opacity=".8" font-family="var(--mono)">${esc(third)}</text>
+
+  // Bands first: they are the backdrop for the attempts inside them.
+  for (const sp of bands) {
+    const g = sp.g, x = X(sp.min) - BAND_SIDE, y = sp.y - BAND_TOP;
+    const w = X(sp.max) + NW + BAND_SIDE - x, h = NH + BAND_TOP + BAND_BOT;
+    const outcome = g.last.status || 'pending';
+    out += `<g class="lineage-band">
+      <rect class="band" x="${x}" y="${y}" width="${w}" height="${h}" rx="16"/>
+      <text class="band-label" x="${x + 13}" y="${y + 16}">${esc(trunc(g.key, 40))} · ${g.attempts} attempts · <tspan class="outcome" fill="${STATUS_FILL[outcome] || '#c4b5fd'}">${esc(outcome)}</tspan></text>
+      ${toggleSvg(x + w - 84, y + 5, 'collapse', 'collapse', g.key, '▾')}
     </g>`;
   }
+
+  // Dependency edges, between cells. Two attempts inside one collapsed cell
+  // that share a dependency would otherwise draw the same arrow twice.
+  const drawn = new Set();
+  for (const st of subs) for (const d of st.depends_on || []) {
+    const a = cellOf[d], b = cellOf[st.id];
+    if (!a || !b || a === b) continue;
+    const key = a.ids[0] + '>' + b.ids[0];
+    if (drawn.has(key)) continue;
+    drawn.add(key);
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
+    const dep = a.collapsed ? a.group.last : byId[d];
+    const bad = dep && (dep.status === 'failed' || dep.status === 'blocked');
+    out += `<path class="edge" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" stroke="${bad ? 'var(--failed)' : dep && dep.status === 'done' ? 'var(--done)' : '#4c5b7c'}" ${bad ? 'stroke-dasharray="6 5"' : ''} marker-end="url(#arrow)"/>`;
+  }
+
+  // Lineage edges. Only where both attempts are drawn separately -- inside a
+  // collapsed chain the link is the node itself.
+  for (const st of subs) {
+    if (!st.retry_of) continue;
+    const a = cellOf[st.retry_of], b = cellOf[st.id];
+    if (!a || !b || a === b) continue;
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
+    out += `<path class="edge lineage" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" marker-end="url(#retryarrow)"/>`;
+    out += `<text class="retrylbl" x="${mx}" y="${(y1 + y2) / 2 - 8}" text-anchor="middle">retry</text>`;
+  }
+
+  for (const c of cells) out += nodeSvg(c, s, byId, col);
+
   svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.innerHTML = out;
   svg.querySelectorAll('.node').forEach(g => g.addEventListener('click', () => {
@@ -644,7 +859,107 @@ function renderDag(s) {
     const agent = st?.agent_index != null ? st.agent_index : agentForSubtask(s, id);
     highlight(id, agent);
   }));
+  svg.querySelectorAll('[data-toggle]').forEach(g => g.addEventListener('click', ev => {
+    ev.stopPropagation();
+    const key = g.dataset.toggle;
+    view.expanded.has(key) ? view.expanded.delete(key) : view.expanded.add(key);
+    view.dagSig = '';
+    renderDag(s);
+  }));
 }
+
+// A subtask id is the one thing on the node that must not be cut: attempts of
+// one lookup differ only in their suffix, so `find_x_retry` truncated to
+// `find_x_…` and `find_x_direct` truncated to `find_x_…` are the same box twice.
+// Shrink the type to fit the ~240px of node width instead.
+const titleSize = id => id.length <= 24 ? 17 : id.length <= 30 ? 14.5 : 13;
+const titleCap = id => id.length <= 24 ? 24 : id.length <= 30 ? 30 : 34;
+
+function toggleSvg(x, y, cls, label, key, caret) {
+  const w = 12 + label.length * 6.4 + 12;
+  return `<g class="toggle ${cls}" data-toggle="${esc(key)}" transform="translate(${x},${y})">
+    <rect width="${w}" height="19" rx="6"/>
+    <text x="8" y="13.5">${caret} ${esc(label)}</text></g>`;
+}
+
+// One drawn box: either a whole collapsed attempt chain, or a single subtask.
+function nodeSvg(cell, s, byId, col) {
+  const g = cell.group;
+  const st = byId[cell.ids[cell.ids.length - 1]];   // a chain reports its last attempt
+  const status = st.status || 'pending';
+  const agent = st.agent_index != null ? st.agent_index : agentForSubtask(s, st.id);
+  const attempts = cell.collapsed ? cell.ids.map(i => byId[i]) : null;
+  const title = cell.collapsed ? g.key : st.id;
+
+  let sub = '';
+  if (status === 'pending') sub = (st.depends_on || []).length ? `waits for ${trunc((st.depends_on || []).join(', '), 30)}` : 'ready to start';
+  else if (status === 'blocked') sub = `upstream failed: ${trunc((st.depends_on || []).filter(d => ['failed', 'blocked'].includes(byId[d]?.status)).join(', '), 24)}`;
+  else if (status === 'running') sub = agent != null ? `agent ${agent} is on it` : 'starting…';
+  else sub = agent != null ? `agent ${agent}` : '';
+
+  const outcome = status === 'done' ? '→ ' + trunc(oneLine(st.answer || ''), 32)
+    : status === 'failed' ? '!! ' + trunc(oneLine(st.error || ''), 32)
+    : status === 'blocked' ? 'never ran' : trunc(oneLine(st.instruction || ''), 34);
+  // A collapsed chain gives its bottom line to the expander, so the group's
+  // terminal outcome moves up into the line the agent label usually holds --
+  // how the chain ENDED is the thing worth a line, not which agent ended it.
+  const sub2 = cell.collapsed ? outcome : sub;
+  const third = cell.collapsed ? '' : outcome;
+
+  // Top right: which wave, and which attempt of how many.
+  let waveTag;
+  if (cell.collapsed) {
+    // A chain whose newest attempt has not run yet must not read as if the
+    // whole thing is still waiting -- the earlier attempts already happened,
+    // and "wave 1 → 2?" says both halves of that.
+    const ran = attempts.map(a => a.wave).filter(w => w);
+    const span = ran.length > 1 ? `waves ${ran[0]}–${ran[ran.length - 1]}` : ran.length ? `wave ${ran[0]}` : '';
+    waveTag = st.wave ? span : (span ? `${span} → ${col[st.id]}?` : `wave ${col[st.id]}?`);
+  } else {
+    const w = st.wave ? `wave ${st.wave}` : (status === 'pending' ? `wave ${col[st.id]}?` : '');
+    waveTag = g.attempts > 1 ? `${w} · try ${g.ids.indexOf(st.id) + 1}/${g.attempts}` : w;
+  }
+
+  const origin = cell.collapsed ? originOf(byId[g.key], s) : originOf(st, s);
+  const pillW = 10 + status.length * 7.4;
+  const badgeText = ORIGIN_TEXT[origin];
+  const badgeW = 9 + badgeText.length * 6.3;
+
+  const tip = cell.collapsed
+    ? `${g.key} — ${g.attempts} attempts, ${status}\n` + attempts.map((a, k) =>
+        `  ${k + 1}. ${a.id} [${a.status}]${a.wave ? ` wave ${a.wave}` : ''}${a.error ? ` — ${a.error}` : ''}${a.answer ? ` — ${a.answer}` : ''}`).join('\n')
+    : `${st.id}${st.retry_of ? `\nretry of ${st.retry_of}` : ''}\n${st.instruction || ''}${st.answer ? '\n→ ' + st.answer : ''}${st.error ? '\n!! ' + st.error : ''}`;
+
+  let extra = '';
+  if (cell.collapsed) {
+    // The attempt count has to be obvious without hovering, so it is spelled
+    // out AND drawn: one dot per attempt, coloured by how that attempt ended.
+    // The dark backing is what keeps a red dot visible on a red node.
+    const label = `${g.attempts} attempts`;
+    const dotsW = attempts.length * 13 + 3;
+    const w = 9 + dotsW + 9 + label.length * 6.4 + 12;
+    const dots = attempts.map((a, k) =>
+      `<circle class="attempt-dot" cx="${9 + 6.5 + k * 13}" cy="11" r="4.5" fill="${STATUS_FILL[a.status] || '#64748b'}"/>`).join('');
+    extra = `<g class="toggle attempts" data-toggle="${esc(g.key)}" transform="translate(12,${NH - 34})">
+      <rect width="${w}" height="22" rx="7"/>${dots}
+      <text x="${9 + dotsW + 9}" y="15">▸ ${esc(label)}</text></g>`;
+  }
+
+  return `<g class="node ${status} ${view.hl === st.id ? 'hl' : ''}" data-id="${esc(st.id)}" transform="translate(${cell.x},${cell.y})">
+      <title>${esc(tip)}</title>
+      <rect class="body" width="${NW}" height="${NH}" rx="14"/>
+      <rect class="pillbg" x="12" y="12" width="${pillW}" height="18" rx="5"/>
+      <text class="pill" x="${12 + pillW / 2}" y="25" text-anchor="middle">${status.toUpperCase()}</text>
+      <g class="badge ${origin}"><rect x="${18 + pillW}" y="12" width="${badgeW}" height="18" rx="5"/>
+        <text x="${18 + pillW + badgeW / 2}" y="25" text-anchor="middle">${badgeText}</text></g>
+      <text x="${NW - 12}" y="25" text-anchor="end" font-size="11.5" opacity=".75">${esc(waveTag)}</text>
+      <text x="12" y="56" font-size="${titleSize(title)}" font-weight="700">${esc(trunc(title, titleCap(title)))}</text>
+      <text x="12" y="80" font-size="12.5" opacity=".85" ${cell.collapsed ? 'font-family="var(--mono)"' : ''}>${esc(sub2)}</text>
+      <text x="12" y="104" font-size="12" opacity=".8" font-family="var(--mono)">${esc(third)}</text>
+      ${extra}
+    </g>`;
+}
+
 function agentForSubtask(s, id) {
   // During a wave the DAG snapshot does not yet know agent indices; the label
   // is the join key both wave_started and agent_started carry.

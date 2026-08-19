@@ -290,6 +290,49 @@ async def test_reconstruction_matches_the_recording_for_dag(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_lineage_survives_replay(tmp_path: Path) -> None:
+    """``retry_of`` has to reach the viewer down BOTH paths.
+
+    A run launched from the UI has a recorded stream; every other run is
+    reconstructed from run.json. The viewer groups attempts from this field,
+    so a field that only survives one path means the grouping silently
+    disappears on the runs that were made from the CLI -- which is most of them.
+    """
+    manager = Manager(
+        FakeChatClient(
+            [
+                plan_reply(("a", []), ("bad", [])),
+                json.dumps({
+                    "reason": "bad failed; trying it another way",
+                    "add": [{"id": "bad_retry", "instruction": "do bad_retry",
+                             "depends_on": [], "retry_of": "bad"}],
+                    "remove": [],
+                }),
+                NO_CHANGE,
+                NO_CHANGE,
+            ]
+        ),
+        ManagerConfig(planning_budget=5),
+    )
+    sink = RecordingSink()
+    result = await orchestrate(
+        task="t",
+        strategy=DagStrategy(manager),
+        policy_factory=lambda i: RecordingPolicy(i, [], crash_on="bad"),
+        run_config=run_config(tmp_path),
+        sink=sink,
+    )
+
+    def lineage(events):
+        last = [e for e in events if e.type == "wave_finished"][-1]
+        return {s["id"]: s.get("retry_of") for s in last.data["dag"]["subtasks"]}
+
+    expected = {"a": None, "bad": None, "bad_retry": "bad"}
+    assert lineage(sink.events) == expected, "the live stream lost the lineage"
+    assert lineage(reconstruct_events(result.run_dir)) == expected, \
+        "reconstruction from run.json lost the lineage"
+
+@pytest.mark.asyncio
 async def test_load_events_prefers_the_recording(tmp_path: Path) -> None:
     result = await orchestrate(
         task="t", strategy=BestOfN(n=1), policy_factory=mock_factory,

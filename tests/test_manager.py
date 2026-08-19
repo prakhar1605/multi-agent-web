@@ -39,6 +39,7 @@ from multi_agent_web.manager import (  # noqa: E402
 from multi_agent_web.manager.manager import (  # noqa: E402
     DECOMPOSE_SYSTEM,
     REPLAN_SYSTEM,
+    _replan_user_message,
 )
 from multi_agent_web.orchestrator import (  # noqa: E402
     LLMJudge,
@@ -254,6 +255,127 @@ class TestPlanValidation:
         assert order.index("c") < order.index("d")
 
 
+# ---------------------------------------------------------------------------
+# 1b. lineage -- declared by the manager, never inferred
+# ---------------------------------------------------------------------------
+class TestLineage:
+    """``retry_of`` says which subtask an added one supersedes.
+
+    The field exists because the alternative is guessing from id similarity,
+    and that guess is wrong in both directions: ``compare_v2`` supersedes
+    ``compare`` without sharing a suffix convention with ``find_x_retry``,
+    while ``price_a`` and ``price_b`` share a prefix and supersede nothing.
+    """
+
+    def test_a_plan_without_lineage_still_parses(self) -> None:
+        """Optional means optional: every run recorded before the field."""
+        dag = DAG(subtasks=[{"id": "a", "instruction": "do a", "depends_on": []}])
+        assert dag.get("a").retry_of is None
+        assert dag.get("a").as_dict()["retry_of"] is None
+
+    def test_lineage_is_carried_into_run_json(self) -> None:
+        dag = DAG(subtasks=[Subtask(id="a", instruction="do a"),
+                            Subtask(id="a2", instruction="do a again", retry_of="a")])
+        by_id = {s["id"]: s for s in dag.as_dict()["subtasks"]}
+        assert by_id["a2"]["retry_of"] == "a"
+        assert by_id["a"]["retry_of"] is None
+
+    def test_lineage_pointing_at_nothing_is_rejected(self) -> None:
+        with pytest.raises(InvalidPlan) as exc:
+            DAG(subtasks=[Subtask(id="a", instruction="do a"),
+                          Subtask(id="a2", instruction="again", retry_of="ghost")])
+        assert "ghost" in str(exc.value) and "retry_of" in str(exc.value)
+
+    def test_a_subtask_cannot_supersede_itself(self) -> None:
+        with pytest.raises(InvalidPlan, match="its own retry_of"):
+            DAG(subtasks=[Subtask(id="a", instruction="do a", retry_of="a")])
+
+    def test_a_lineage_loop_is_rejected_and_named(self) -> None:
+        """Two subtasks each claiming to supersede the other has no first attempt."""
+        a = Subtask(id="a", instruction="do a", retry_of="b")
+        b = Subtask(id="b", instruction="do b", retry_of="a")
+        with pytest.raises(InvalidPlan) as exc:
+            DAG(subtasks=[a, b])
+        assert "lineage loops" in str(exc.value)
+        assert "a" in str(exc.value) and "b" in str(exc.value)
+
+    def test_lineage_does_not_schedule(self) -> None:
+        """A retry waits for nothing: the attempt it replaces already finished.
+
+        This is the whole reason it is a separate field rather than a
+        dependency -- an edge would make the retry wait on a failed subtask,
+        which would block it instead of replacing it.
+        """
+        dag = DAG(subtasks=[Subtask(id="find", instruction="find it"),
+                            Subtask(id="find_again", instruction="find it again",
+                                    retry_of="find")])
+        dag.get("find").status = "failed"
+        assert [s.id for s in dag.ready()] == ["find_again"]
+        assert dag.propagate_blocked() == [], "lineage propagated a block"
+
+    def test_a_retry_of_a_failed_lookup_is_the_ordinary_case(self) -> None:
+        """The pricecheck shape: the lookup failed, its join is blocked, and
+        the manager adds another attempt plus a join over the retry."""
+        dag = dag_of(("price_a", []), ("price_b", []), ("join", ["price_a", "price_b"]))
+        dag.get("price_b").status = "failed"
+        dag.get("price_a").status = "done"
+        dag.propagate_blocked()
+        assert dag.get("join").status == "blocked"
+        edited = dag.apply(
+            Replan(
+                add=[
+                    Subtask(id="price_b_retry", instruction="try b again",
+                            retry_of="price_b"),
+                    Subtask(id="join_v2", instruction="join",
+                            depends_on=["price_a", "price_b_retry"]),
+                ],
+                remove=["join"],
+            )
+        )
+        assert edited.get("price_b_retry").retry_of == "price_b"
+        assert [s.id for s in edited.ready()] == ["price_b_retry"]
+
+    def test_removing_the_subtask_a_retry_names_is_refused(self) -> None:
+        """Lineage may not be left dangling by an edit, and the error says how
+        to fix it -- otherwise the manager is sent to look at the wrong node."""
+        dag = dag_of(("a", []), ("join", ["a"]))
+        dag.get("a").status = "failed"
+        dag.propagate_blocked()
+        with pytest.raises(InvalidPlan) as exc:
+            dag.apply(
+                Replan(
+                    add=[Subtask(id="join_v2", instruction="join", retry_of="join")],
+                    remove=["join"],
+                )
+            )
+        assert "retries" in str(exc.value) and "drop" in str(exc.value)
+
+    def test_attempts_of_one_subtask_are_recoverable_from_the_final_graph(self) -> None:
+        """What the viewer actually needs: walk retry_of back to the original.
+
+        Three attempts spread across three waves are one logical subtask, and
+        this is the only thing in run.json that says so.
+        """
+        dag = DAG(subtasks=[
+            Subtask(id="find", instruction="find", status="failed", wave=1),
+            Subtask(id="find_retry", instruction="again", retry_of="find",
+                    status="failed", wave=2),
+            Subtask(id="find_direct", instruction="direct url", retry_of="find_retry",
+                    status="failed", wave=3),
+            Subtask(id="other", instruction="other", status="done", wave=1),
+        ])
+        by_id = dag.by_id
+        chains: dict[str, list[str]] = {}
+        for subtask in dag.subtasks:
+            root = subtask.id
+            while by_id[root].retry_of:
+                root = by_id[root].retry_of
+            chains.setdefault(root, []).append(subtask.id)
+        assert chains == {
+            "find": ["find", "find_retry", "find_direct"],
+            "other": ["other"],
+        }
+
 class TestGraphEdits:
     def test_applying_a_replan_returns_a_new_validated_graph(self) -> None:
         dag = dag_of(("a", []), ("b", ["a"]))
@@ -426,6 +548,40 @@ class TestPrompts:
     def test_the_replan_prompt_states_the_remaining_budget(self) -> None:
         """The model cannot keep to a ceiling it was not told."""
         assert "at most 7 edit(s)" in REPLAN_SYSTEM.format(remaining=7)
+
+    def test_the_replan_example_is_a_reply_we_would_accept(self) -> None:
+        """Same discipline as the decompose example: the worked example must
+        parse as a Replan AND apply cleanly, or the prompt teaches the model to
+        emit something our own validator rejects."""
+        rendered = REPLAN_SYSTEM.format(remaining=4)
+        assert "{{" not in rendered and "}}" not in rendered
+
+        start = rendered.index('{"reason"')
+        example = json.loads(rendered[start : rendered.index('"remove": []}') + len('"remove": []}')])
+        replan = Replan.model_validate(example)
+        added = replan.add[0]
+        assert added.retry_of == "find_price", "the example must show the field it teaches"
+        assert added.depends_on == [], "a retry waits for nothing -- lineage is not a dependency"
+
+        dag = dag_of(("find_price", []))
+        dag.get("find_price").status = "failed"
+        edited = dag.apply(replan)
+        assert edited.get("find_price_direct").retry_of == "find_price"
+
+    def test_the_replan_prompt_forbids_superseding_something_it_removes(self) -> None:
+        """The one way to get a retry_of edit rejected, so the prompt says it."""
+        rendered = REPLAN_SYSTEM.format(remaining=4)
+        assert "never point it at an id you are also removing" in rendered
+
+    def test_the_manager_sees_lineage_it_already_declared(self) -> None:
+        """Otherwise a third attempt gets declared against the original rather
+        than against the second, and the chain reads as a fork."""
+        dag = DAG(subtasks=[
+            Subtask(id="find", instruction="find it", status="failed"),
+            Subtask(id="find_again", instruction="again", retry_of="find", status="failed"),
+        ])
+        message = _replan_user_message(dag, [], remaining=4)
+        assert "(retry of: find)" in message
 
 
 class TestManagerReplan:
@@ -662,6 +818,97 @@ async def test_manager_reroutes_around_a_blocked_join(tmp_path: Path) -> None:
     assert result.answer == "did compare_found"
     assert result.contributing_indices  # the join's agent is credited
 
+
+@pytest.mark.asyncio
+async def test_a_declared_retry_survives_into_run_json(tmp_path: Path) -> None:
+    """The whole point of the field, end to end.
+
+    Two attempts at a lookup that fails both times, with the second declared
+    as superseding the first. ``run.json`` must carry that declaration, because
+    it is the only thing that distinguishes "a retry of the lookup" from "an
+    unrelated subtask that also failed" -- which is what a reader of the graph
+    could not tell before.
+    """
+    manager = manager_with(
+        [
+            plan_reply(("price_a", []), ("price_missing", []),
+                       ("compare", ["price_a", "price_missing"])),
+            json.dumps({
+                "reason": "price_missing ran out of steps; trying it another way",
+                "add": [
+                    {"id": "price_missing_direct", "instruction": "do price_missing_direct",
+                     "depends_on": [], "retry_of": "price_missing"},
+                    {"id": "compare_v2", "instruction": "do compare_v2",
+                     "depends_on": ["price_a", "price_missing_direct"]},
+                ],
+                "remove": ["compare"],
+            }),
+            replan_reply(add=[("compare_found", ["price_a"])], remove=["compare_v2"],
+                         reason="both attempts failed; compare what arrived"),
+            NO_CHANGE,
+            NO_CHANGE,
+        ],
+        planning_budget=10,
+    )
+
+    result = await orchestrate(
+        task="two prices, one of which cannot be found",
+        strategy=DagStrategy(manager),
+        policy_factory=lambda i: RecordingPolicy(i, [], crash_on="price_missing"),
+        run_config=run_config(tmp_path),
+    )
+
+    final = {s["id"]: s for s in result.details["final_dag"]["subtasks"]}
+    assert final["price_missing_direct"]["retry_of"] == "price_missing"
+    assert final["price_missing"]["retry_of"] is None
+    assert final["price_a"]["retry_of"] is None
+
+    # The attempts ran in different waves -- which is exactly why the graph
+    # needs the field: nothing about wave 1 and wave 2 links them.
+    assert final["price_missing"]["wave"] == 1
+    assert final["price_missing_direct"]["wave"] == 2
+
+    # And the declaration is in the replan record too, so the edit that
+    # introduced it can be read back on its own.
+    added = [a for r in result.details["replans"] for a in r.get("add", [])]
+    assert {a["id"]: a.get("retry_of") for a in added}["price_missing_direct"] == "price_missing"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_naming_a_removed_subtask_is_refused_without_sinking_the_run(
+    tmp_path: Path,
+) -> None:
+    """A manager that supersedes a subtask AND removes it in the same reply is
+    refused, recorded, and the run carries on -- the same containment every
+    other invalid edit gets, not a new fatal path."""
+    manager = manager_with(
+        [
+            plan_reply(("a", []), ("join", ["a"])),
+            json.dumps({
+                "reason": "replacing the join",
+                "add": [{"id": "join_v2", "instruction": "do join_v2",
+                         "depends_on": ["a"], "retry_of": "join"}],
+                "remove": ["join"],
+            }),
+            NO_CHANGE,
+            NO_CHANGE,
+        ],
+        planning_budget=10,
+    )
+    result = await orchestrate(
+        task="t",
+        strategy=DagStrategy(manager),
+        policy_factory=lambda i: RecordingPolicy(i, []),
+        run_config=run_config(tmp_path),
+    )
+    rejected = [r for r in result.details["replans"]
+                if str(r.get("outcome", "")).startswith("rejected")]
+    assert len(rejected) == 1
+    assert "retries" in rejected[0]["outcome"]
+    # Not billed, and the plan it already had still ran to completion.
+    assert result.details["budget"]["spent"] == 0
+    final = {s["id"]: s["status"] for s in result.details["final_dag"]["subtasks"]}
+    assert final == {"a": "done", "join": "done"}
 
 @pytest.mark.asyncio
 async def test_replanning_adds_work_and_charges_the_budget(tmp_path: Path) -> None:

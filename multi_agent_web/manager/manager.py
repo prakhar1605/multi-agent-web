@@ -169,8 +169,8 @@ Reply with a single JSON object and NOTHING else. No markdown, no code fence, \
 no commentary. The object has exactly three keys:
 
   "reason"  one sentence on why you are or are not changing the plan
-  "add"     a list of NEW subtasks, each with exactly "id", "instruction" and \
-"depends_on"
+  "add"     a list of NEW subtasks, each with "id", "instruction" and \
+"depends_on", plus "retry_of" where it applies (see below)
   "remove"  a list of ids to drop from the plan
 
 Rules:
@@ -184,6 +184,24 @@ failed or blocked stays in the record.
   - New ids must not clash with existing ones. Dependencies may point at \
 existing subtasks or at other subtasks you are adding in this same reply.
   - The graph must stay acyclic and every dependency must exist.
+
+SAY WHEN A SUBTASK SUPERSEDES ANOTHER
+  If a subtask you are adding is another attempt at work an existing subtask \
+already tried -- a retry of a lookup that failed, or a different route to the \
+same finding -- set "retry_of" to that subtask's id. It is a record of \
+lineage, NOT a dependency: the new attempt does not wait for the old one, and \
+you should still leave "depends_on" as whatever the new attempt genuinely \
+needs.
+
+  Set it only when the new subtask really replaces the old one's job. Leave it \
+out, or null, for genuinely new work. It must name a subtask that is still in \
+the plan after this reply, so never point it at an id you are also removing.
+
+  Example -- find_price failed, so try it another way:
+  {{"reason": "find_price ran out of steps; trying the direct URL instead", \
+"add": [{{"id": "find_price_direct", "instruction": "Go straight to the \
+product page at /catalogue/dune and report the listed price.", \
+"depends_on": [], "retry_of": "find_price"}}], "remove": []}}
 
 Change the plan when, and only when:
   - a subtask failed and a different approach could still get the information;
@@ -410,8 +428,11 @@ def _replan_user_message(
     lines = ["# CURRENT PLAN"]
     for subtask in dag.topological_order():
         deps = ", ".join(subtask.depends_on) or "none"
+        # Lineage already declared is shown back, so a third attempt is
+        # declared against the second rather than against the original.
+        lineage = f" (retry of: {subtask.retry_of})" if subtask.retry_of else ""
         lines.append(
-            f"- {subtask.id} [{subtask.status}] (depends on: {deps})\n"
+            f"- {subtask.id} [{subtask.status}] (depends on: {deps}){lineage}\n"
             f"    {subtask.instruction}"
         )
 
@@ -438,10 +459,18 @@ def _replan_user_message(
     return "\n".join(lines)
 
 
-def build_subtask(subtask_id: str, instruction: str, depends_on: list[str] | None = None) -> Subtask:
+def build_subtask(
+    subtask_id: str,
+    instruction: str,
+    depends_on: list[str] | None = None,
+    retry_of: str | None = None,
+) -> Subtask:
     """Small constructor, mostly for tests and for hand-written plans."""
     return Subtask(
-        id=subtask_id, instruction=instruction, depends_on=list(depends_on or [])
+        id=subtask_id,
+        instruction=instruction,
+        depends_on=list(depends_on or []),
+        retry_of=retry_of,
     )
 
 

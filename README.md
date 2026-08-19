@@ -211,6 +211,19 @@ manager's reason shown for each. **Live** starts a run from a form (with the
 same cost estimate the CLI prints) and streams it over a WebSocket; when it
 finishes it is just a run in `runs/`, replayable like the rest.
 
+Retries are drawn as retries. When the manager adds a subtask that supersedes
+an earlier one it says so, in `Subtask.retry_of`
+([format](docs/run_json.md#retry_of--which-attempts-are-the-same-piece-of-work)),
+and the graph gathers those attempts into one lane instead of scattering them
+across waves as unrelated failures: collapsed to a single node with the attempt
+count and each attempt's outcome as a dot, expandable to the full chain with
+dotted lineage edges and `try 2/3` labels. Every node is badged with where it
+came from — the first decomposition, a mid-run retry, or mid-run new work — and
+the legend on the page names all of it, because the panel has to read in a
+screen recording. The field is optional and additive: a run whose manager left
+it null, which is every run recorded before it existed, draws exactly as it did
+before.
+
 The orchestrator emits events through an observe-only `EventSink`
 ([events.py](multi_agent_web/orchestrator/events.py)). Detached — which is the
 default everywhere except the UI — it discards everything, so `run.json` and

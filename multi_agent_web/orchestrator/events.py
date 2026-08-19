@@ -58,6 +58,11 @@ EVENT VOCABULARY
 ``screenshot`` is a path relative to the run directory (``agent_2/step_004.png``).
 The image itself never travels on the bus -- a four-agent run would flood any
 socket -- the viewer fetches it by path.
+
+Every ``dag`` snapshot carries each subtask's ``retry_of`` (see
+``manager.plan``), including the reconstructed ones, so a viewer can group the
+attempts of one logical subtask no matter which way it got the stream. It is
+``null`` throughout for a run recorded before the field existed.
 """
 
 from __future__ import annotations
@@ -387,7 +392,8 @@ def _reconstruct_dag_events(
         replans -- wave 0 means the initial plan."""
         current: dict[str, dict[str, Any]] = {
             s["id"]: {"id": s["id"], "instruction": s["instruction"],
-                      "depends_on": list(s.get("depends_on") or [])}
+                      "depends_on": list(s.get("depends_on") or []),
+                      "retry_of": s.get("retry_of")}
             for s in initial["subtasks"]
         }
         order = [s["id"] for s in initial["subtasks"]]
@@ -403,6 +409,7 @@ def _reconstruct_dag_events(
                     current[added["id"]] = {
                         "id": added["id"], "instruction": added["instruction"],
                         "depends_on": list(added.get("depends_on") or []),
+                        "retry_of": added.get("retry_of"),
                     }
                     if added["id"] not in order:
                         order.append(added["id"])

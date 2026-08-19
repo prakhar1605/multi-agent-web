@@ -10,6 +10,8 @@ than being quietly repaired:
 * the graph must be acyclic
 * at least one subtask must have no dependencies       (something can start)
 * ids must be unique and non-empty
+* every ``retry_of`` id must name a subtask that exists, and lineage must not
+  loop                                                (no dangling lineage)
 
 Repairing would be easy -- drop the unknown edge, break the back edge, promote
 an arbitrary node to root -- and that is exactly why it is not done. A manager
@@ -38,6 +40,28 @@ distinction is the whole point of re-routing: when a failed lookup blocks a
 join, the manager's fix is exactly to remove the blocked join and add one over
 the inputs that did arrive. Refusing to remove a ``blocked`` node would forbid
 the one edit the block was supposed to prompt.
+
+LINEAGE IS DECLARED, NOT INFERRED
+=================================
+When a lookup fails, the manager's usual fix is to add another subtask that
+tries the same thing a different way. Nothing in the graph said so: the retry
+arrived as a fresh node in a later wave, and the only trace of the connection
+was that the manager had picked a similar id. Inferring "retry" from id
+similarity is guesswork, and it is wrong in both directions -- ``compare_v2``
+supersedes ``compare`` while sharing no suffix convention with
+``find_x_retry``, and two unrelated ``find_price_a`` / ``find_price_b`` lookups
+share a prefix without either superseding the other.
+
+So ``Subtask.retry_of`` lets the manager *say* it, and it is the manager's
+field like ``id`` and ``instruction`` are. It is lineage, not dependency: a
+retry does not wait for the attempt it replaces (that attempt is already
+finished), so ``retry_of`` never affects scheduling, ``ready`` or
+``propagate_blocked``. It exists so a report can group attempts of one logical
+subtask instead of scattering them across waves.
+
+It is optional and defaults to ``None``, which is what keeps every run recorded
+before it existed parseable -- and what lets a manager that has nothing to
+declare say nothing.
 """
 
 from __future__ import annotations
@@ -90,6 +114,15 @@ class Subtask(BaseModel):
     depends_on: list[str] = Field(
         default_factory=list,
         description="Ids of subtasks that must finish before this one starts.",
+    )
+    #: Lineage, not dependency -- see the module docstring. Optional, and
+    #: ``None`` on every subtask written before the field existed.
+    retry_of: str | None = Field(
+        default=None,
+        description=(
+            "Id of the subtask this one supersedes, when it is another attempt "
+            "at the same work. Null for a subtask that supersedes nothing."
+        ),
     )
     status: SubtaskStatus = "pending"
 
@@ -188,6 +221,26 @@ class DAG(BaseModel):
                     f"subtask {subtask.id!r} depends on itself, so it can never "
                     f"start."
                 )
+            if subtask.retry_of is not None:
+                if subtask.retry_of not in known:
+                    raise InvalidPlan(
+                        f"subtask {subtask.id!r} declares retry_of "
+                        f"{subtask.retry_of!r}, which is not in the plan. "
+                        f"Lineage must point at a subtask that is still here. "
+                        f"Known ids: {sorted(known)}."
+                    )
+                if subtask.retry_of == subtask.id:
+                    raise InvalidPlan(
+                        f"subtask {subtask.id!r} declares itself as its own "
+                        f"retry_of. A subtask cannot supersede itself."
+                    )
+
+        lineage_cycle = self._find_lineage_cycle()
+        if lineage_cycle:
+            raise InvalidPlan(
+                f"lineage loops: {' -> '.join(lineage_cycle)}. Following "
+                f"retry_of must reach an original subtask, not come back round."
+            )
 
         # Cycles are checked before roots on purpose. A graph with no root is
         # necessarily cyclic, so both rules would fire on it -- and "a -> b -> a"
@@ -237,6 +290,25 @@ class DAG(BaseModel):
                 found = walk(node)
                 if found:
                     return found
+        return None
+
+    def _find_lineage_cycle(self) -> list[str] | None:
+        """Return one ``retry_of`` loop as a path, or None.
+
+        Lineage is a chain, not a graph -- each subtask supersedes at most one
+        other -- so following it is a walk, and the only way it fails is by
+        coming back round. Cheap to check and worth checking: a loop would make
+        "which attempt came first" unanswerable.
+        """
+        by_id = {s.id: s for s in self.subtasks}
+        for start in by_id:
+            seen: list[str] = []
+            node: str | None = start
+            while node is not None and node in by_id:
+                if node in seen:
+                    return seen[seen.index(node):] + [node]
+                seen.append(node)
+                node = by_id[node].retry_of
         return None
 
     # --- reading the graph -------------------------------------------------
@@ -363,6 +435,24 @@ class DAG(BaseModel):
             )
 
         removed = set(replan.remove)
+        # Caught here rather than left to the constructor: "you removed the
+        # subtask this one says it retries" is a fixable instruction, while
+        # "retry_of names something not in the plan" sends the manager looking
+        # at the wrong edit.
+        severed = [
+            (s.id, s.retry_of)
+            for s in [*self.subtasks, *replan.add]
+            if s.id not in removed and s.retry_of in removed
+        ]
+        if severed:
+            pairs = ", ".join(f"{i!r} retries {t!r}" for i, t in severed)
+            raise InvalidPlan(
+                f"cannot remove {sorted({t for _, t in severed})}: {pairs}. "
+                f"Removing a subtask that another declares as its retry_of "
+                f"would leave lineage pointing at nothing. Keep it, or drop "
+                f"the retry_of."
+            )
+
         kept = [s.model_copy(deep=True) for s in self.subtasks if s.id not in removed]
         return DAG(subtasks=kept + [s.model_copy(deep=True) for s in replan.add])
 

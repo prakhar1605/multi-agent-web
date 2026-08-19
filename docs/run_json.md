@@ -179,6 +179,7 @@ subtask that answered — which is why it was a list from the start.
 | `id` | The manager's slug for this piece of work. Stable across replans. |
 | `instruction` | What one agent was told to do. The context block passed to a dependent is *not* included here — it is reconstructed from its dependencies' answers. |
 | `depends_on` | Ids that had to finish first. |
+| `retry_of` | Id of the subtask this one supersedes, or `null`. Lineage, not dependency — see below. |
 | `status` | `pending` \| `running` \| `done` \| `failed` \| `blocked`. |
 | `agent_index` | Which agent ran it, matching `agents[].index` and `agent_<index>/`. `null` if it never ran. |
 | `wave` | Which wave it ran in. `null` if it never ran. |
@@ -193,6 +194,53 @@ status is what tells them apart.
 graph after every applied replan, carrying the execution record. **`growth` is
 the pair subtracted** — the DAG-growth and replan-rate numbers, precomputed so
 they do not have to be re-derived per run.
+
+#### `retry_of` — which attempts are the same piece of work
+
+When a lookup fails, the manager's usual fix is to add another subtask that
+tries it a different way. Without `retry_of` that arrives as a fresh node in a
+later wave with nothing linking it to the attempt it replaces, and the only
+clue is that the manager happened to pick a similar id. That clue does not
+survive contact with real runs: in `runs/`, one manager produced
+`find_silent_cartographer` → `_retry` → `_direct` (three attempts, two naming
+conventions) and another produced `compare_prices` → `compare_prices_v2`, while
+`find_light_attic` and `find_tipping_velvet` share a prefix and supersede
+nothing. So the manager declares it instead of a reader guessing.
+
+```json
+{"id": "find_price_direct", "instruction": "Go straight to /catalogue/dune…",
+ "depends_on": [], "retry_of": "find_price"}
+```
+
+* **Optional.** `null` on every subtask the manager did not declare, including
+  every run recorded before the field existed. Consumers must treat absent and
+  `null` the same and fall back to showing the subtask on its own.
+* **Lineage, not dependency.** A retry does not wait for the attempt it
+  replaces — that attempt already finished — so `retry_of` never affects
+  scheduling, readiness, or blocking. Do not draw it as a dependency edge.
+* **Validated.** The id must name a subtask that is in the same graph, may not
+  be the subtask itself, and following `retry_of` must terminate rather than
+  loop. A replan that removes a subtask another one names is rejected with the
+  rest of the invalid-edit cases (recorded in `replans[].outcome`, run
+  continues).
+* **Chains, not pairs.** A third attempt names the second, not the original.
+  Walk `retry_of` back to a subtask with `null` to get the whole chain in order.
+
+To group the attempts of one logical subtask:
+
+```python
+by_id = {s["id"]: s for s in dag["subtasks"]}
+chains = {}
+for s in dag["subtasks"]:
+    root = s["id"]
+    while by_id[root].get("retry_of"):
+        root = by_id[root]["retry_of"]
+    chains.setdefault(root, []).append(s["id"])
+```
+
+The same field appears on `replans[].add[]`, so the edit that introduced a
+retry can be read back on its own, and on every `dag` snapshot in the event
+stream — recorded and reconstructed alike.
 
 #### `replans[]`
 
